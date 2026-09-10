@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Environment variables / API keys
+.env
+.env.*
+
+# Runtime data
+data/
+workspace/
+
+# Build output
+dist/
+
+# OS / editor
+.DS_Store

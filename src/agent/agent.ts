@@ -1,0 +1,108 @@
+import { LLMProvider, LLMMessage } from '../providers/llm.interface.js';
+import { ToolRegistry } from '../tools/tool-registry.js';
+import { MemoryManager } from '../memory/memory-manager.js';
+
+export interface AgentOptions {
+  maxIterations?: number;
+  memoryManager?: MemoryManager;
+}
+
+export class Agent {
+  private provider: LLMProvider;
+  private toolRegistry: ToolRegistry;
+  private memoryManager?: MemoryManager;
+  private maxIterations: number;
+
+  constructor(provider: LLMProvider, toolRegistry: ToolRegistry, options?: AgentOptions) {
+    this.provider = provider;
+    this.toolRegistry = toolRegistry;
+    this.memoryManager = options?.memoryManager;
+    this.maxIterations = options?.maxIterations ?? 5;
+  }
+
+  /**
+   * Memproses pesan pengguna melalui Reasoning Loop dengan memuat & menyimpan riwayat percakapan
+   */
+  async processMessage(userMessage: string, chatId?: string | number): Promise<string> {
+    const tools = this.toolRegistry.getAllTools();
+    let messages: LLMMessage[] = [];
+
+    // 1. Simpan pesan user baru ke memori SQLite jika chatId diberikan
+    if (this.memoryManager && chatId !== undefined) {
+      this.memoryManager.saveMessage(chatId, 'user', userMessage);
+      // Muat N pesan terakhir dari SQLite (termasuk pesan user baru di atas)
+      messages = this.memoryManager.getRecentMessages(chatId, 20);
+    } else {
+      messages = [{ role: 'user', content: userMessage }];
+    }
+
+    let iteration = 0;
+
+    while (iteration < this.maxIterations) {
+      iteration++;
+      console.log(`🤖 [Agent Loop] Iterasi ke-${iteration} (chat_id: ${chatId || 'local'})...`);
+
+      try {
+        const result = await this.provider.generate({
+          messages,
+          tools,
+          systemInstruction:
+            'Kamu adalah Degen Agent AI, asisten pintar berbasis Telegram. Kamu mengingat riwayat percakapan sebelumnya. Jika pengguna menanyakan waktu atau pertanyaan yang memerlukan alat, selalu gunakan alat yang tersedia sebelum menjawab.',
+        });
+
+        // 1. Jika LLM meminta pemanggilan Tool (Action)
+        if (result.toolCalls && result.toolCalls.length > 0) {
+          if (result.rawResponse) {
+            messages.push({
+              role: 'model',
+              rawParts: result.rawResponse.parts,
+            });
+          }
+
+          for (const call of result.toolCalls) {
+            console.log(`💡 [Agent] LLM memilih tool: "${call.name}" dengan argumen:`, call.args);
+
+            // Eksekusi tool (Observation)
+            const toolResult = await this.toolRegistry.executeTool(call.name, call.args);
+            console.log(`📦 [Agent] Hasil eksekusi "${call.name}":`, toolResult);
+
+            // Kirim balik hasil tool ke riwayat percakapan LLM
+            messages.push({
+              role: 'user',
+              rawParts: [
+                {
+                  functionResponse: {
+                    name: call.name,
+                    response: { result: toolResult },
+                  },
+                },
+              ],
+            });
+          }
+
+          // Lanjutkan loop ke iterasi berikutnya agar LLM memproses hasil tool
+          continue;
+        }
+
+        // 2. Jika LLM memberikan jawaban teks akhir (Final Answer)
+        if (result.text) {
+          console.log(`✅ [Agent] Jawaban final diterima dari LLM.`);
+
+          // Simpan balasan akhir assistant ke database SQLite jika chatId ada
+          if (this.memoryManager && chatId !== undefined) {
+            this.memoryManager.saveMessage(chatId, 'assistant', result.text);
+          }
+
+          return result.text;
+        }
+      } catch (error: any) {
+        console.error(`❌ [Agent Error] Terjadi kesalahan pada iterasi ke-${iteration}:`, error);
+        return `⚠️ Maaf, terjadi kesalahan pada Agent: ${error.message || String(error)}`;
+      }
+
+      break;
+    }
+
+    return '⚠️ Agent mencapai batas maksimum iterasi tanpa menghasilkan jawaban.';
+  }
+}
