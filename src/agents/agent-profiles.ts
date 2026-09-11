@@ -25,6 +25,7 @@ import { createProjectTool } from "../tools/impl/create-project.tool.js";
 import { listProjectsTool } from "../tools/impl/list-projects.tool.js";
 import { addToWatchlistTool } from "../tools/impl/add-to-watchlist.tool.js";
 import { updateProjectTool } from "../tools/impl/update-project.tool.js";
+import { updateWatchlistTool } from "../tools/impl/update-watchlist.tool.js";
 
 export interface AgentProfile {
   /**
@@ -109,6 +110,7 @@ export function buildAgentProfiles(
   devTools.register(listProjectsTool);
   devTools.register(addToWatchlistTool);
   devTools.register(updateProjectTool);
+  devTools.register(updateWatchlistTool);
 
   const devAgent = new Agent(provider, devTools, {
     memoryManager,
