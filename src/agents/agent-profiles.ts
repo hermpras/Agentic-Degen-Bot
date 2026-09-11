@@ -2,6 +2,7 @@ import { LLMProvider } from "../providers/llm.interface.js";
 import { MemoryManager } from "../memory/memory-manager.js";
 import { Agent } from "../agent/agent.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
+import { ApprovalManager } from "../approval/approval-manager.js";
 
 import { getCurrentTimeTool } from "../tools/impl/get-current-time.tool.js";
 import { webSearchTool } from "../tools/impl/web-search.tool.js";
@@ -16,9 +17,15 @@ import { githubGetWorkflowStatusTool } from "../tools/impl/github-get-workflow-s
 export interface AgentProfile {
   /** Nama unik agent, dipakai orchestrator buat routing */
   name: string;
+
   /** Deskripsi buat orchestrator milih agent mana yang cocok untuk sebuah pesan */
   description: string;
+
+  /** Instance agent */
   agent: Agent;
+
+  /** Approval manager yang dipakai oleh ToolRegistry agent ini */
+  approvalManager: ApprovalManager;
 }
 
 /**
@@ -31,6 +38,7 @@ export function buildAgentProfiles(
 ): AgentProfile[] {
   // === General Agent — fallback default, buat research/degen/general chat ===
   const generalTools = new ToolRegistry();
+
   generalTools.register(getCurrentTimeTool);
   generalTools.register(webSearchTool);
   generalTools.register(browsePageTool);
@@ -43,6 +51,7 @@ export function buildAgentProfiles(
 
   // === Dev & HoodBear Agent — debugging code, baca repo, urusan project HoodBear ===
   const devTools = new ToolRegistry();
+
   devTools.register(getCurrentTimeTool);
   devTools.register(readFileTool);
   devTools.register(writeFileTool);
@@ -64,12 +73,14 @@ export function buildAgentProfiles(
       description:
         "Untuk riset Web3 umum, cari info/berita terkini, ngobrol santai, atau pertanyaan yang tidak spesifik soal development/HoodBear.",
       agent: generalAgent,
+      approvalManager: generalTools.getApprovalManager(),
     },
     {
       name: "dev_hoodbear",
       description:
         "Untuk debugging code, baca/tulis file lokal, cek GitHub (commit, status build, isi repo), atau apa pun yang berhubungan dengan development project HoodBear.",
       agent: devAgent,
+      approvalManager: devTools.getApprovalManager(),
     },
   ];
 }
