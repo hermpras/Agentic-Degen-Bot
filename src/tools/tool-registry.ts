@@ -73,6 +73,60 @@ export class ToolRegistry {
       });
     }
 
+    return this.executeToolDirect(name, args);
+  }
+
+  async executeApprovedTool(approvalId: string): Promise<string> {
+    const request = this.approvalManager.getRequest(approvalId);
+
+    if (!request) {
+      return JSON.stringify({
+        success: false,
+        error: `Approval request "${approvalId}" tidak ditemukan.`,
+      });
+    }
+
+    if (request.status !== "APPROVED") {
+      return JSON.stringify({
+        success: false,
+        error: `Approval request "${approvalId}" belum berstatus APPROVED.`,
+        status: request.status,
+      });
+    }
+
+    const tool = this.getTool(request.toolName);
+
+    if (!tool) {
+      return JSON.stringify({
+        success: false,
+        error: `Tool "${request.toolName}" tidak ditemukan di ToolRegistry.`,
+      });
+    }
+
+    if (tool.riskLevel !== request.riskLevel) {
+      return JSON.stringify({
+        success: false,
+        error: `Risk level tool "${request.toolName}" berubah setelah approval dibuat.`,
+      });
+    }
+
+    console.log(
+      `✅ [ToolRegistry] Menjalankan approved tool "${request.toolName}" dengan approval ID ${approvalId}`,
+    );
+
+    return this.executeToolDirect(request.toolName, request.args);
+  }
+
+  private async executeToolDirect(
+    name: string,
+    args: Record<string, any>,
+  ): Promise<string> {
+    const tool = this.getTool(name);
+
+    if (!tool) {
+      return `Error: Tool dengan nama "${name}" tidak ditemukan di ToolRegistry.`;
+    }
+
     try {
       console.log(
         `🔧 [ToolRegistry] Memanggil tool: ${name} dengan argumen:`,
