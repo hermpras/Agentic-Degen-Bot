@@ -3,6 +3,7 @@ import { chromium, Browser, BrowserContext, Page } from "playwright";
 export interface BrowserExecutorOptions {
   headless?: boolean;
   timeoutMs?: number;
+  storageStatePath?: string;
 }
 
 export interface BrowserPageResult {
@@ -18,10 +19,12 @@ export class BrowserExecutor {
 
   private readonly headless: boolean;
   private readonly timeoutMs: number;
+  private readonly storageStatePath: string | undefined;
 
   constructor(options: BrowserExecutorOptions = {}) {
     this.headless = options.headless ?? true;
     this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.storageStatePath = options.storageStatePath?.trim() || undefined;
   }
 
   async start(): Promise<void> {
@@ -33,11 +36,21 @@ export class BrowserExecutor {
       `🌐 [BrowserExecutor] Starting browser (headless=${this.headless})...`,
     );
 
+    if (this.storageStatePath) {
+      console.log(
+        `🔐 [BrowserExecutor] Using storage state: ${this.storageStatePath}`,
+      );
+    } else {
+      console.log("🔐 [BrowserExecutor] Starting without saved session.");
+    }
+
     this.browser = await chromium.launch({
       headless: this.headless,
     });
 
-    this.context = await this.browser.newContext();
+    this.context = await this.browser.newContext({
+      storageState: this.storageStatePath,
+    });
 
     this.context.setDefaultTimeout(this.timeoutMs);
 
@@ -179,6 +192,24 @@ export class BrowserExecutor {
     return this.page.url();
   }
 
+  async saveStorageState(outputPath?: string): Promise<string> {
+    const context = await this.getContext();
+
+    const targetPath = outputPath?.trim() || this.storageStatePath;
+
+    if (!targetPath) {
+      throw new Error("Path storage state wajib diisi.");
+    }
+
+    await context.storageState({
+      path: targetPath,
+    });
+
+    console.log(`🔐 [BrowserExecutor] Storage state saved: ${targetPath}`);
+
+    return targetPath;
+  }
+
   async screenshot(path: string): Promise<void> {
     const page = await this.getPage();
 
@@ -206,6 +237,18 @@ export class BrowserExecutor {
       this.context = null;
       this.page = null;
     }
+  }
+
+  private async getContext(): Promise<BrowserContext> {
+    if (!this.context) {
+      await this.start();
+    }
+
+    if (!this.context) {
+      throw new Error("Browser context gagal dibuat.");
+    }
+
+    return this.context;
   }
 
   private async getPage(): Promise<Page> {
