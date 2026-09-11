@@ -1,8 +1,10 @@
 import { AgentDatabase } from "../database/agent-database.js";
 
 export type PlannedTaskType =
+  | "OPEN_PAGE"
   | "X_FOLLOW"
   | "X_LIKE"
+  | "X_REPOST"
   | "X_COMMENT"
   | "X_REPLY"
   | "X_QUOTE"
@@ -14,36 +16,57 @@ export type PlannedTaskType =
   | "WHITELIST"
   | "CUSTOM";
 
+export type FormType = "WEBSITE" | "GOOGLE_FORM";
+
+export type FormFieldType =
+  | "TWITTER_HANDLE"
+  | "WALLET_ADDRESS"
+  | "OWN_TWEET_URL"
+  | "TEXT"
+  | "EMAIL"
+  | "DISCORD"
+  | "TELEGRAM"
+  | "CUSTOM";
+
+export type FormCheckboxType =
+  | "X_FOLLOW"
+  | "X_LIKE"
+  | "X_REPOST"
+  | "X_COMMENT"
+  | "X_REPLY"
+  | "X_QUOTE"
+  | "CUSTOM";
+
+export interface FormFieldRequirement {
+  type: FormFieldType;
+  label?: string;
+  required?: boolean;
+  value?: string | null;
+}
+
+export interface FormCheckboxRequirement {
+  type: FormCheckboxType;
+  label?: string;
+  required?: boolean;
+  checked?: boolean;
+}
+
+export interface FormRequirement {
+  formType: FormType;
+  targetUrl: string;
+  fields?: FormFieldRequirement[];
+  checkboxes?: FormCheckboxRequirement[];
+}
+
 export interface TaskRequirement {
   type: PlannedTaskType;
   description: string;
-
-  /**
-   * URL yang menjadi target/source task.
-   *
-   * Contoh:
-   * https://x.com/project/status/123
-   */
   targetUrl?: string | null;
 
-  /**
-   * Kalau true, task ini menghasilkan URL milik account
-   * yang menjalankannya.
-   *
-   * Contoh:
-   * X_QUOTE menghasilkan:
-   * https://x.com/Tuyul1/status/123
-   */
   producesOwnTweetUrl?: boolean;
-
-  /**
-   * Kalau true, task membutuhkan hasil URL dari task
-   * sebelumnya.
-   *
-   * Contoh:
-   * FORM_SUBMIT membutuhkan ownTweetUrl dari X_QUOTE.
-   */
   requiresOwnTweetUrl?: boolean;
+
+  form?: FormRequirement;
 }
 
 export interface TaskPlannerInput {
@@ -54,7 +77,6 @@ export interface TaskPlannerInput {
 
 export interface PlannedTask {
   planTaskId: string;
-
   projectName: string;
 
   accountId: number;
@@ -65,14 +87,36 @@ export interface PlannedTask {
   taskType: PlannedTaskType;
 
   targetUrl: string | null;
-
   description: string;
 
   dependsOn: string[];
 
   outputKey: string | null;
-
   inputFrom: string | null;
+
+  form: PlannedForm | null;
+}
+
+export interface PlannedForm {
+  formType: FormType;
+  targetUrl: string;
+
+  fields: PlannedFormField[];
+  checkboxes: PlannedFormCheckbox[];
+}
+
+export interface PlannedFormField {
+  type: FormFieldType;
+  label: string | null;
+  required: boolean;
+  value: string | null;
+}
+
+export interface PlannedFormCheckbox {
+  type: FormCheckboxType;
+  label: string | null;
+  required: boolean;
+  checked: boolean;
 }
 
 export interface TaskPlan {
@@ -88,6 +132,7 @@ export class TaskPlanner {
 
   createPlan(input: TaskPlannerInput): TaskPlan {
     const projectName = input.projectName.trim();
+
     const sourceUrl = input.sourceUrl.trim();
 
     if (!projectName) {
@@ -135,22 +180,10 @@ export class TaskPlanner {
 
         const dependsOn: string[] = [];
 
-        /*
-         * Requirement normal akan mengikuti urutan requirement.
-         *
-         * Contoh:
-         * FOLLOW → LIKE → QUOTE
-         *
-         * sehingga executor punya urutan yang eksplisit.
-         */
         if (previousTaskId) {
           dependsOn.push(previousTaskId);
         }
 
-        /*
-         * Kalau task membutuhkan ownTweetUrl,
-         * cari task sebelumnya yang menghasilkan URL tersebut.
-         */
         let inputFrom: string | null = null;
 
         if (requirement.requiresOwnTweetUrl) {
@@ -191,8 +224,11 @@ export class TaskPlanner {
           dependsOn,
 
           outputKey,
-
           inputFrom,
+
+          form: requirement.form
+            ? this.buildPlannedForm(requirement.form, account)
+            : null,
         };
 
         tasks.push(plannedTask);
@@ -209,17 +245,70 @@ export class TaskPlanner {
     };
   }
 
+  private buildPlannedForm(
+    form: FormRequirement,
+    account: AccountRow,
+  ): PlannedForm {
+    const targetUrl = form.targetUrl.trim();
+
+    if (!targetUrl) {
+      throw new Error(
+        `Target URL form untuk account "${account.name}" tidak boleh kosong.`,
+      );
+    }
+
+    const fields = (form.fields ?? []).map((field) => ({
+      type: field.type,
+      label: field.label?.trim() || null,
+      required: field.required ?? true,
+      value: this.resolveFormFieldValue(field, account),
+    }));
+
+    const checkboxes = (form.checkboxes ?? []).map((checkbox) => ({
+      type: checkbox.type,
+      label: checkbox.label?.trim() || null,
+      required: checkbox.required ?? false,
+      checked: checkbox.checked ?? true,
+    }));
+
+    return {
+      formType: form.formType,
+      targetUrl,
+      fields,
+      checkboxes,
+    };
+  }
+
+  private resolveFormFieldValue(
+    field: FormFieldRequirement,
+    account: AccountRow,
+  ): string | null {
+    switch (field.type) {
+      case "TWITTER_HANDLE":
+        return account.twitter_handle ?? null;
+
+      case "WALLET_ADDRESS":
+        return account.wallet_address ?? null;
+
+      case "OWN_TWEET_URL":
+        return null;
+
+      default:
+        return field.value?.trim() || null;
+    }
+  }
+
   private getActiveAccounts(): AccountRow[] {
     const stmt = this.database.getDb().prepare(`
-      SELECT
-        id,
-        name,
-        twitter_handle,
-        wallet_address
-      FROM accounts
-      WHERE status = 'ACTIVE'
-      ORDER BY id ASC
-    `);
+          SELECT
+            id,
+            name,
+            twitter_handle,
+            wallet_address
+          FROM accounts
+          WHERE status = 'ACTIVE'
+          ORDER BY id ASC
+        `);
 
     return stmt.all() as AccountRow[];
   }
