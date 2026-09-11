@@ -23,9 +23,7 @@ export class BrowserExecutor {
 
   constructor(options: BrowserExecutorOptions = {}) {
     this.headless = options.headless ?? true;
-
     this.timeoutMs = options.timeoutMs ?? 30_000;
-
     this.storageStatePath = options.storageStatePath?.trim() || undefined;
   }
 
@@ -149,7 +147,6 @@ export class BrowserExecutor {
     const page = await this.getPage();
 
     const normalizedSelector = selector.trim();
-
     const normalizedKey = key.trim();
 
     if (!normalizedSelector) {
@@ -186,7 +183,6 @@ export class BrowserExecutor {
     const page = await this.getPage();
 
     const normalizedSelector = selector.trim();
-
     const normalizedAttribute = attribute.trim();
 
     if (!normalizedSelector) {
@@ -198,6 +194,18 @@ export class BrowserExecutor {
     }
 
     return page.locator(normalizedSelector).getAttribute(normalizedAttribute);
+  }
+
+  async evaluate<T>(script: string): Promise<T> {
+    const page = await this.getPage();
+
+    const normalizedScript = script.trim();
+
+    if (!normalizedScript) {
+      throw new Error("Script evaluate tidak boleh kosong.");
+    }
+
+    return page.evaluate(normalizedScript) as Promise<T>;
   }
 
   getCurrentUrl(): string {
