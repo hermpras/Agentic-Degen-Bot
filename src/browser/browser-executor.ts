@@ -4,6 +4,7 @@ export interface BrowserExecutorOptions {
   headless?: boolean;
   timeoutMs?: number;
   storageStatePath?: string;
+  connectOverCDPUrl?: string;
 }
 
 export interface BrowserPageResult {
@@ -20,11 +21,19 @@ export class BrowserExecutor {
   private readonly headless: boolean;
   private readonly timeoutMs: number;
   private readonly storageStatePath: string | undefined;
+  private readonly connectOverCDPUrl: string | undefined;
 
   constructor(options: BrowserExecutorOptions = {}) {
     this.headless = options.headless ?? true;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.storageStatePath = options.storageStatePath?.trim() || undefined;
+    this.connectOverCDPUrl = options.connectOverCDPUrl?.trim() || undefined;
+
+    if (this.headless && this.connectOverCDPUrl) {
+      throw new Error(
+        "BrowserExecutor tidak boleh menggunakan headless=true saat connectOverCDP.",
+      );
+    }
   }
 
   async start(): Promise<void> {
@@ -35,6 +44,37 @@ export class BrowserExecutor {
     console.log(
       `🌐 [BrowserExecutor] Starting browser (headless=${this.headless})...`,
     );
+
+    if (this.connectOverCDPUrl) {
+      console.log(
+        `🔗 [BrowserExecutor] Connecting over CDP: ${this.connectOverCDPUrl}`,
+      );
+
+      this.browser = await chromium.connectOverCDP(this.connectOverCDPUrl);
+
+      const contexts = this.browser.contexts();
+
+      if (contexts.length === 0) {
+        throw new Error(
+          "Browser CDP terhubung tetapi tidak memiliki browser context.",
+        );
+      }
+
+      this.context = contexts[0];
+
+      this.context.setDefaultTimeout(this.timeoutMs);
+
+      const pages = this.context.pages();
+
+      if (pages.length > 0) {
+        this.page = pages[0];
+      } else {
+        this.page = await this.context.newPage();
+      }
+
+      console.log("🔗 [BrowserExecutor] Connected to existing browser.");
+      return;
+    }
 
     if (this.storageStatePath) {
       console.log(
@@ -61,7 +101,6 @@ export class BrowserExecutor {
 
   async open(url: string): Promise<BrowserPageResult> {
     const page = await this.getPage();
-
     const normalizedUrl = url.trim();
 
     if (!normalizedUrl) {
@@ -103,7 +142,6 @@ export class BrowserExecutor {
 
   async elementExists(selector: string): Promise<boolean> {
     const page = await this.getPage();
-
     const normalizedSelector = selector.trim();
 
     if (!normalizedSelector) {
@@ -117,7 +155,6 @@ export class BrowserExecutor {
 
   async click(selector: string): Promise<void> {
     const page = await this.getPage();
-
     const normalizedSelector = selector.trim();
 
     if (!normalizedSelector) {
@@ -131,7 +168,6 @@ export class BrowserExecutor {
 
   async fill(selector: string, value: string): Promise<void> {
     const page = await this.getPage();
-
     const normalizedSelector = selector.trim();
 
     if (!normalizedSelector) {
@@ -145,7 +181,6 @@ export class BrowserExecutor {
 
   async press(selector: string, key: string): Promise<void> {
     const page = await this.getPage();
-
     const normalizedSelector = selector.trim();
     const normalizedKey = key.trim();
 
@@ -166,7 +201,6 @@ export class BrowserExecutor {
 
   async getText(selector: string): Promise<string> {
     const page = await this.getPage();
-
     const normalizedSelector = selector.trim();
 
     if (!normalizedSelector) {
@@ -181,7 +215,6 @@ export class BrowserExecutor {
     attribute: string,
   ): Promise<string | null> {
     const page = await this.getPage();
-
     const normalizedSelector = selector.trim();
     const normalizedAttribute = attribute.trim();
 
@@ -198,7 +231,6 @@ export class BrowserExecutor {
 
   async evaluate<T>(script: string): Promise<T> {
     const page = await this.getPage();
-
     const normalizedScript = script.trim();
 
     if (!normalizedScript) {
@@ -220,7 +252,6 @@ export class BrowserExecutor {
 
   async saveStorageState(outputPath?: string): Promise<string> {
     const context = await this.getContext();
-
     const targetPath = outputPath?.trim() || this.storageStatePath;
 
     if (!targetPath) {
@@ -238,7 +269,6 @@ export class BrowserExecutor {
 
   async screenshot(path: string): Promise<void> {
     const page = await this.getPage();
-
     const normalizedPath = path.trim();
 
     if (!normalizedPath) {
