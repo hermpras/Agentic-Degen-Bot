@@ -1,33 +1,54 @@
 import { LLMProvider } from "../providers/llm.interface.js";
+
 import { MemoryManager } from "../memory/memory-manager.js";
+
 import { Agent } from "../agent/agent.js";
+
 import { ToolRegistry } from "../tools/tool-registry.js";
+
 import { ApprovalManager } from "../approval/approval-manager.js";
+
 import { AgentDatabase } from "../database/agent-database.js";
 
 import { getCurrentTimeTool } from "../tools/impl/get-current-time.tool.js";
+
 import { webSearchTool } from "../tools/impl/web-search.tool.js";
+
 import { readFileTool } from "../tools/impl/read-file.tool.js";
+
 import { writeFileTool } from "../tools/impl/write-file.tool.js";
+
 import { browsePageTool } from "../tools/impl/browse-page.tool.js";
 
 import { githubReadFileTool } from "../tools/impl/github-read-file.tool.js";
+
 import { githubListDirectoryTool } from "../tools/impl/github-list-directory.tool.js";
+
 import { githubGetRecentCommitsTool } from "../tools/impl/github-get-recent-commits.tool.js";
+
 import { githubGetWorkflowStatusTool } from "../tools/impl/github-get-workflow-status.tool.js";
 
 import { createAccountTool } from "../tools/impl/create-account.tool.js";
+
 import { listAccountsTool } from "../tools/impl/list-accounts.tool.js";
+
 import { updateAccountTool } from "../tools/impl/update-account.tool.js";
+
 import { renameAccountTool } from "../tools/impl/rename-account.tool.js";
 
 import { createProjectTool } from "../tools/impl/create-project.tool.js";
+
 import { listProjectsTool } from "../tools/impl/list-projects.tool.js";
+
 import { addToWatchlistTool } from "../tools/impl/add-to-watchlist.tool.js";
+
 import { updateProjectTool } from "../tools/impl/update-project.tool.js";
+
 import { updateWatchlistTool } from "../tools/impl/update-watchlist.tool.js";
 
 import { createProjectTaskPlanTool } from "../tools/impl/create-project-task-plan.tool.js";
+
+import { executeProjectTaskPlanTool } from "../tools/impl/execute-project-task-plan.tool.js";
 
 export interface AgentProfile {
   /**
@@ -142,15 +163,21 @@ export function buildAgentProfiles(
   // Project Task Workflow
   // ============================================================
 
-  /*
+  /**
    * Tool ini hanya membuat task plan.
    *
    * BELUM mengeksekusi task.
-   * Actual execution akan kita sambungkan
-   * setelah approval boundary siap.
    */
-
   devTools.register(createProjectTaskPlanTool(database));
+
+  /**
+   * Tool ini menjalankan task workflow.
+   *
+   * Tool memiliki risk level APPROVAL sehingga
+   * ToolRegistry akan menahan execution sampai
+   * user memberikan approval melalui ApprovalService.
+   */
+  devTools.register(executeProjectTaskPlanTool(database));
 
   const devAgent = new Agent(provider, devTools, {
     memoryManager,
@@ -170,8 +197,13 @@ export function buildAgentProfiles(
       "berdasarkan requirements dan ACTIVE accounts yang tersedia. " +
       "create_project_task_plan HANYA membuat rencana task. " +
       "Tool tersebut TIDAK mengeksekusi task dan TIDAK melakukan submit. " +
-      "Jangan pernah mengklaim sebuah task sudah dikerjakan " +
-      "jika baru membuat task plan. " +
+      "Jika user secara eksplisit meminta task yang sudah direncanakan " +
+      "untuk dijalankan, gunakan execute_project_task_plan. " +
+      "execute_project_task_plan memiliki approval boundary. " +
+      "Jangan pernah mengklaim task sudah dijalankan ketika tool tersebut " +
+      "masih menunggu approval. " +
+      "Jangan pernah mengklaim sebuah task berhasil jika hasil execution " +
+      "tidak menunjukkan task tersebut berhasil. " +
       "Untuk informasi real-time, gunakan tool yang tersedia. " +
       "Kamu mengingat riwayat percakapan sebelumnya.",
   });
@@ -199,7 +231,8 @@ export function buildAgentProfiles(
       description:
         "Untuk debugging code, baca/tulis file lokal, cek GitHub, " +
         "mengelola account whitelist, mengelola project/watchlist, " +
-        "dan membuat task plan whitelist/project.",
+        "membuat task plan whitelist/project, dan menjalankan task " +
+        "yang memerlukan approval user.",
 
       agent: devAgent,
 
