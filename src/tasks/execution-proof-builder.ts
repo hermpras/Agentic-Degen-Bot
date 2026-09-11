@@ -1,6 +1,8 @@
 import { FormExecutionPlan } from "./form-execution-planner.js";
 import type { FormExecutionResult } from "./form-executor.js";
 
+export type ExecutionProofStatus = "READY_TO_SUBMIT" | "SUBMITTED" | "FAILED";
+
 export interface ExecutionProofField {
   index: number;
   type: string;
@@ -14,8 +16,9 @@ export interface ExecutionProof {
   createdAt: string;
   url: string;
   formType: FormExecutionPlan["formType"];
-  executionStatus: "READY_TO_SUBMIT" | "FAILED";
+  executionStatus: ExecutionProofStatus;
   submitAttempted: boolean;
+  submitSucceeded: boolean;
   fieldsFilled: number;
   checkboxesChecked: number;
   fields: ExecutionProofField[];
@@ -28,6 +31,7 @@ export interface ExecutionProofResultInput {
   fieldsFilled: number;
   checkboxesChecked: number;
   submitAttempted: boolean;
+  submitSucceeded: boolean;
   message: string;
 }
 
@@ -47,24 +51,34 @@ export class ExecutionProofBuilder {
           : "SKIPPED",
     }));
 
-    const executionStatus = result.submitAttempted
-      ? "FAILED"
-      : "READY_TO_SUBMIT";
+    const executionStatus: ExecutionProofStatus = result.submitSucceeded
+      ? "SUBMITTED"
+      : result.submitAttempted
+        ? "FAILED"
+        : "READY_TO_SUBMIT";
 
     const summary =
-      executionStatus === "READY_TO_SUBMIT"
+      executionStatus === "SUBMITTED"
         ? [
-            "Form berhasil diisi.",
+            "Form berhasil diisi dan disubmit.",
             `${result.fieldsFilled} field terisi.`,
             `${result.checkboxesChecked} checkbox dicentang.`,
-            "Submit belum dilakukan.",
+            "Submit berhasil diverifikasi.",
           ].join(" ")
-        : [
-            "Form execution memiliki indikasi kegagalan.",
-            `${result.fieldsFilled} field terisi.`,
-            `${result.checkboxesChecked} checkbox dicentang.`,
-            "Submit attempt tercatat.",
-          ].join(" ");
+        : executionStatus === "FAILED"
+          ? [
+              "Form execution memiliki indikasi kegagalan.",
+              `${result.fieldsFilled} field terisi.`,
+              `${result.checkboxesChecked} checkbox dicentang.`,
+              "Submit attempt tercatat tetapi belum terverifikasi berhasil.",
+              result.message,
+            ].join(" ")
+          : [
+              "Form berhasil diisi.",
+              `${result.fieldsFilled} field terisi.`,
+              `${result.checkboxesChecked} checkbox dicentang.`,
+              "Submit belum dilakukan.",
+            ].join(" ");
 
     return {
       version: 1,
@@ -73,6 +87,7 @@ export class ExecutionProofBuilder {
       formType: result.formType,
       executionStatus,
       submitAttempted: result.submitAttempted,
+      submitSucceeded: result.submitSucceeded,
       fieldsFilled: result.fieldsFilled,
       checkboxesChecked: result.checkboxesChecked,
       fields,
@@ -88,6 +103,7 @@ export class ExecutionProofBuilder {
       formType: plan.formType,
       executionStatus: "FAILED",
       submitAttempted: false,
+      submitSucceeded: false,
       fieldsFilled: 0,
       checkboxesChecked: 0,
       fields: plan.fields.map((field) => ({

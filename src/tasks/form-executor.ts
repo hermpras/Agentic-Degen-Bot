@@ -8,6 +8,7 @@ import {
   FormFieldType,
   PlannedForm,
   PlannedFormCheckbox,
+  PlannedFormSubmit,
 } from "./task-planner.js";
 import { FieldMapper } from "./field-mapper.js";
 import {
@@ -29,6 +30,7 @@ export interface FormExecutionResult {
   fieldsFilled: number;
   checkboxesChecked: number;
   submitAttempted: boolean;
+  submitSucceeded: boolean;
   message: string;
   proof: ExecutionProof;
 }
@@ -67,7 +69,6 @@ export class FormExecutor {
     const result = await this.browser.open(form.targetUrl);
 
     console.log(`📝 [FormExecutor] Form opened: ${result.url}`);
-
     console.log(`📝 [FormExecutor] Form title: ${result.title}`);
 
     return result.text;
@@ -88,13 +89,6 @@ export class FormExecutor {
   }
 
   async fillForm(form: PlannedForm): Promise<FormExecutionResult> {
-    /*
-     * Step 1:
-     * Validate execution plan BEFORE opening browser.
-     *
-     * Kalau planner mengatakan BLOCKED,
-     * executor tidak boleh menyentuh form.
-     */
     const executionPlan = this.executionPlanner.plan(form);
 
     this.logExecutionPlan(executionPlan);
@@ -103,11 +97,6 @@ export class FormExecutor {
       throw new Error(executionPlan.message);
     }
 
-    /*
-     * Step 2:
-     * Hanya form yang READY yang boleh
-     * diteruskan ke browser.
-     */
     await this.openForm(form);
 
     let fieldsFilled = 0;
@@ -120,7 +109,6 @@ export class FormExecutor {
       const inspection = await this.inspector.inspect();
 
       inspectedFields = inspection.fields;
-
       inspectedCheckboxes = inspection.checkboxes;
 
       console.log(
@@ -187,25 +175,47 @@ export class FormExecutor {
     );
 
     /*
-     * Step 3:
-     * Build execution result.
-     *
-     * Submit tetap TIDAK dilakukan.
+     * Tidak ada konfigurasi submit.
+     * Form berhenti di READY_TO_SUBMIT.
      */
-    const resultWithoutProof = {
-      formType: form.formType,
-      url: form.targetUrl,
-      fieldsFilled,
-      checkboxesChecked,
-      submitAttempted: false,
-      message: "Form berhasil diisi tetapi belum disubmit.",
-    };
+    if (!form.submit) {
+      const resultWithoutProof = {
+        formType: form.formType,
+        url: form.targetUrl,
+        fieldsFilled,
+        checkboxesChecked,
+        submitAttempted: false,
+        submitSucceeded: false,
+        message: "Form berhasil diisi tetapi submit belum dikonfigurasi.",
+      };
+
+      const proof = this.proofBuilder.build(executionPlan, resultWithoutProof);
+
+      console.log(
+        `🧾 [FormExecutor] Execution proof created: ${proof.summary}`,
+      );
+
+      return {
+        ...resultWithoutProof,
+        proof,
+      };
+    }
 
     /*
-     * Step 4:
-     * Build audit/proof dari execution plan
-     * dan execution result.
+     * Submit dikonfigurasi secara eksplisit.
      */
+    const submitResult = await this.submitForm(form.submit);
+
+    const resultWithoutProof = {
+      formType: form.formType,
+      url: submitResult.url,
+      fieldsFilled,
+      checkboxesChecked,
+      submitAttempted: true,
+      submitSucceeded: submitResult.succeeded,
+      message: submitResult.message,
+    };
+
     const proof = this.proofBuilder.build(executionPlan, resultWithoutProof);
 
     console.log(`🧾 [FormExecutor] Execution proof created: ${proof.summary}`);
@@ -214,6 +224,157 @@ export class FormExecutor {
       ...resultWithoutProof,
       proof,
     };
+  }
+
+  private async submitForm(submit: PlannedFormSubmit): Promise<{
+    url: string;
+    succeeded: boolean;
+    message: string;
+  }> {
+    const selector = submit.selector?.trim() || null;
+    const label = submit.label?.trim() || null;
+
+    if (!selector && !label) {
+      throw new Error(
+        "Submit form tidak valid: selector atau label wajib tersedia.",
+      );
+    }
+
+    /*
+     * Mode A: explicit selector.
+     *
+     * Selector diberikan langsung oleh planner.
+     * Kita tidak melakukan auto-detection.
+     */
+    if (selector) {
+      const exists = await this.browser.elementExists(selector);
+
+      if (!exists) {
+        throw new Error(`Submit selector tidak ditemukan: ${selector}`);
+      }
+
+      console.log(
+        `🚀 [FormExecutor] Submitting using explicit selector: ${selector}`,
+      );
+
+      await this.browser.click(selector);
+
+      const pageResult = await this.browser.getPageResult();
+
+      return {
+        url: pageResult.url,
+        succeeded: true,
+        message:
+          "Submit berhasil diklik menggunakan explicit selector. Hasil halaman tercatat untuk verifikasi.",
+      };
+    }
+
+    /*
+     * Mode B: explicit label.
+     *
+     * Kita hanya menerima tombol dengan label yang
+     * benar-benar sama setelah normalisasi.
+     */
+    const normalizedLabel = this.normalizeText(label);
+
+    if (!normalizedLabel) {
+      throw new Error("Submit label tidak boleh kosong.");
+    }
+
+    const submitSelector =
+      await this.findUniqueSubmitButtonByLabel(normalizedLabel);
+
+    console.log(
+      `🚀 [FormExecutor] Submitting using explicit label: "${label}"`,
+    );
+
+    await this.browser.click(submitSelector);
+
+    const pageResult = await this.browser.getPageResult();
+
+    return {
+      url: pageResult.url,
+      succeeded: true,
+      message:
+        "Submit berhasil diklik menggunakan explicit label. Hasil halaman tercatat untuk verifikasi.",
+    };
+  }
+
+  private async findUniqueSubmitButtonByLabel(
+    normalizedLabel: string,
+  ): Promise<string> {
+    const candidates = await this.browser.evaluate<
+      Array<{
+        index: number;
+        text: string;
+        ariaLabel: string;
+      }>
+    >(
+      `
+          (() => {
+            const normalize = (value) =>
+              (value ?? "")
+                .trim()
+                .toLowerCase()
+                .replace(/\\s+/g, " ");
+
+            const elements = Array.from(
+              document.querySelectorAll(
+                'button, input[type="submit"], input[type="button"]'
+              )
+            );
+
+            return elements
+              .map((element, index) => ({
+                index,
+                text:
+                  element.tagName.toLowerCase() === "input"
+                    ? element.getAttribute("value") ?? ""
+                    : element.textContent ?? "",
+                ariaLabel:
+                  element.getAttribute("aria-label") ?? "",
+              }))
+              .filter((candidate) => {
+                const text =
+                  normalize(candidate.text);
+
+                const ariaLabel =
+                  normalize(candidate.ariaLabel);
+
+                return (
+                  text === ${JSON.stringify(normalizedLabel)} ||
+                  ariaLabel === ${JSON.stringify(normalizedLabel)}
+                );
+              });
+          })()
+        `,
+    );
+
+    if (candidates.length === 0) {
+      throw new Error(
+        `Submit button dengan label "${normalizedLabel}" tidak ditemukan.`,
+      );
+    }
+
+    if (candidates.length > 1) {
+      const candidateText = candidates
+        .map(
+          (candidate) =>
+            `"${candidate.text}" (aria-label="${candidate.ariaLabel}", index=${candidate.index})`,
+        )
+        .join(", ");
+
+      throw new Error(
+        [
+          `Submit button dengan label "${normalizedLabel}" ambigu.`,
+          `Candidates: ${candidateText}.`,
+          "Tidak ada tombol yang diklik.",
+          "Diperlukan selector eksplisit.",
+        ].join(" "),
+      );
+    }
+
+    return `button, input[type="submit"], input[type="button"] >> nth=${candidates[0].index}`;
   }
 
   private logExecutionPlan(plan: FormExecutionPlan): void {
@@ -246,10 +407,6 @@ export class FormExecutor {
 
     const normalizedLabel = this.normalizeText(label);
 
-    /*
-     * Priority 1:
-     * Exact label match.
-     */
     if (normalizedLabel) {
       const exactLabel = availableFields.filter(
         (field) => this.normalizeText(field.label) === normalizedLabel,
@@ -265,12 +422,6 @@ export class FormExecutor {
         );
       }
 
-      /*
-       * Priority 2:
-       * Partial label match.
-       *
-       * Partial match harus unique.
-       */
       const partialLabel = availableFields.filter((field) => {
         const fieldLabel = this.normalizeText(field.label);
 
@@ -301,10 +452,6 @@ export class FormExecutor {
       }
     }
 
-    /*
-     * Priority 3:
-     * FieldMappingResolver.
-     */
     if (this.resolver) {
       const resolution = this.resolver.resolve(
         type,
@@ -329,17 +476,8 @@ export class FormExecutor {
       if (resolution.status === "LOW_CONFIDENCE") {
         throw new Error(this.buildLowConfidenceFieldError(type, resolution));
       }
-
-      /*
-       * NOT_FOUND:
-       * lanjut ke fallback heuristic.
-       */
     }
 
-    /*
-     * Priority 4:
-     * Existing heuristic fallback.
-     */
     const keywords = this.getFieldKeywords(type);
 
     const keywordMatches = availableFields.filter((field) =>
@@ -498,7 +636,9 @@ export class FormExecutor {
 
       const normalized = this.normalizeText(text);
 
-      return keywords.some((keyword) => normalized.includes(keyword));
+      return keywords.some((keyword) =>
+        normalized.includes(this.normalizeText(keyword)),
+      );
     });
   }
 

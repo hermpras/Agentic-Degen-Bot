@@ -51,21 +51,25 @@ export interface FormCheckboxRequirement {
   checked?: boolean;
 }
 
+export interface FormSubmitRequirement {
+  selector?: string;
+  label?: string;
+}
+
 export interface FormRequirement {
   formType: FormType;
   targetUrl: string;
   fields?: FormFieldRequirement[];
   checkboxes?: FormCheckboxRequirement[];
+  submit?: FormSubmitRequirement;
 }
 
 export interface TaskRequirement {
   type: PlannedTaskType;
   description: string;
   targetUrl?: string | null;
-
   producesOwnTweetUrl?: boolean;
   requiresOwnTweetUrl?: boolean;
-
   form?: FormRequirement;
 }
 
@@ -78,31 +82,25 @@ export interface TaskPlannerInput {
 export interface PlannedTask {
   planTaskId: string;
   projectName: string;
-
   accountId: number;
   accountName: string;
   twitterHandle: string | null;
   walletAddress: string | null;
-
   taskType: PlannedTaskType;
-
   targetUrl: string | null;
   description: string;
-
   dependsOn: string[];
-
   outputKey: string | null;
   inputFrom: string | null;
-
   form: PlannedForm | null;
 }
 
 export interface PlannedForm {
   formType: FormType;
   targetUrl: string;
-
   fields: PlannedFormField[];
   checkboxes: PlannedFormCheckbox[];
+  submit: PlannedFormSubmit | null;
 }
 
 export interface PlannedFormField {
@@ -117,6 +115,11 @@ export interface PlannedFormCheckbox {
   label: string | null;
   required: boolean;
   checked: boolean;
+}
+
+export interface PlannedFormSubmit {
+  selector: string | null;
+  label: string | null;
 }
 
 export interface TaskPlan {
@@ -209,23 +212,16 @@ export class TaskPlanner {
         const plannedTask: PlannedTask = {
           planTaskId,
           projectName,
-
           accountId: account.id,
           accountName: account.name,
           twitterHandle: account.twitter_handle,
           walletAddress: account.wallet_address,
-
           taskType: requirement.type,
-
           targetUrl: requirement.targetUrl?.trim() || null,
-
           description: requirement.description.trim(),
-
           dependsOn,
-
           outputKey,
           inputFrom,
-
           form: requirement.form
             ? this.buildPlannedForm(requirement.form, account)
             : null,
@@ -271,11 +267,36 @@ export class TaskPlanner {
       checked: checkbox.checked ?? true,
     }));
 
+    const submit = this.buildPlannedFormSubmit(form.submit);
+
     return {
       formType: form.formType,
       targetUrl,
       fields,
       checkboxes,
+      submit,
+    };
+  }
+
+  private buildPlannedFormSubmit(
+    submit: FormSubmitRequirement | undefined,
+  ): PlannedFormSubmit | null {
+    if (!submit) {
+      return null;
+    }
+
+    const selector = submit.selector?.trim() || null;
+    const label = submit.label?.trim() || null;
+
+    if (!selector && !label) {
+      throw new Error(
+        "Konfigurasi submit form harus memiliki selector atau label.",
+      );
+    }
+
+    return {
+      selector,
+      label,
     };
   }
 
@@ -300,15 +321,15 @@ export class TaskPlanner {
 
   private getActiveAccounts(): AccountRow[] {
     const stmt = this.database.getDb().prepare(`
-          SELECT
-            id,
-            name,
-            twitter_handle,
-            wallet_address
-          FROM accounts
-          WHERE status = 'ACTIVE'
-          ORDER BY id ASC
-        `);
+      SELECT
+        id,
+        name,
+        twitter_handle,
+        wallet_address
+      FROM accounts
+      WHERE status = 'ACTIVE'
+      ORDER BY id ASC
+    `);
 
     return stmt.all() as AccountRow[];
   }
