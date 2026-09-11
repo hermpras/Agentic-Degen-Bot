@@ -1,66 +1,130 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type } from "@google/genai";
+
 import {
   LLMProvider,
   LLMGenerateOptions,
   LLMGenerateResult,
-} from './llm.interface.js';
-import { Tool } from '../tools/tool.interface.js';
+} from "./llm.interface.js";
+
+import { Tool, ToolParameterProperty } from "../tools/tool.interface.js";
 
 export class GeminiProvider implements LLMProvider {
-  readonly name = 'gemini';
+  readonly name = "gemini";
+
   private ai: GoogleGenAI;
   private primaryModel: string;
   private fallbackModels: string[];
 
-  constructor(apiKey: string, modelName = 'gemini-3.5-flash') {
+  constructor(apiKey: string, modelName = "gemini-3.5-flash") {
     if (!apiKey) {
-      throw new Error('GEMINI_API_KEY tidak ditemukan di .env');
+      throw new Error("GEMINI_API_KEY tidak ditemukan di .env");
     }
+
     this.ai = new GoogleGenAI({ apiKey });
+
     this.primaryModel = modelName;
-    this.fallbackModels = ['gemini-3.5-flash-lite', 'gemini-3.7-flash', 'gemini-3.8-flash'];
+
+    this.fallbackModels = [
+      "gemini-3.5-flash-lite",
+      "gemini-3.7-flash",
+      "gemini-3.8-flash",
+    ];
   }
 
   private mapType(type: string): Type {
     switch (type) {
-      case 'string':
+      case "string":
         return Type.STRING;
-      case 'number':
+
+      case "number":
         return Type.NUMBER;
-      case 'boolean':
+
+      case "boolean":
         return Type.BOOLEAN;
-      case 'array':
+
+      case "array":
         return Type.ARRAY;
-      case 'object':
+
+      case "object":
       default:
         return Type.OBJECT;
     }
   }
 
+  /**
+   * Mengubah schema ToolParameterProperty internal
+   * menjadi schema yang bisa diterima Gemini.
+   *
+   * Mapper ini recursive supaya nested:
+   *
+   * array
+   *   -> items
+   *       -> object
+   *           -> properties
+   *               -> array
+   *                   -> items
+   *
+   * semuanya tetap dipertahankan.
+   */
+  private mapProperty(property: ToolParameterProperty): Record<string, any> {
+    const mapped: Record<string, any> = {
+      type: this.mapType(property.type),
+    };
+
+    if (property.description) {
+      mapped.description = property.description;
+    }
+
+    if (property.enum) {
+      mapped.enum = property.enum;
+    }
+
+    if (property.items) {
+      mapped.items = this.mapProperty(property.items);
+    }
+
+    if (property.properties) {
+      const nestedProperties: Record<string, any> = {};
+
+      for (const [key, nestedProperty] of Object.entries(property.properties)) {
+        nestedProperties[key] = this.mapProperty(nestedProperty);
+      }
+
+      mapped.properties = nestedProperties;
+    }
+
+    if (property.required) {
+      mapped.required = property.required;
+    }
+
+    return mapped;
+  }
+
   private mapToolsToGemini(tools?: Tool[]): any {
-    if (!tools || tools.length === 0) return undefined;
+    if (!tools || tools.length === 0) {
+      return undefined;
+    }
 
     return [
       {
-        functionDeclarations: tools.map((t) => {
+        functionDeclarations: tools.map((tool) => {
           const properties: Record<string, any> = {};
-          if (t.parameters?.properties) {
-            for (const [key, prop] of Object.entries(t.parameters.properties)) {
-              properties[key] = {
-                type: this.mapType(prop.type),
-                description: prop.description,
-                enum: prop.enum,
-              };
+
+          if (tool.parameters?.properties) {
+            for (const [key, property] of Object.entries(
+              tool.parameters.properties,
+            )) {
+              properties[key] = this.mapProperty(property);
             }
           }
 
           return {
-            name: t.name,
-            description: t.description,
+            name: tool.name,
+            description: tool.description,
             parameters: {
               type: Type.OBJECT,
               properties,
-              required: t.parameters?.required,
+              required: tool.parameters?.required,
             },
           };
         }),
@@ -74,21 +138,28 @@ export class GeminiProvider implements LLMProvider {
     const contents = options.messages.map((msg) => {
       if (msg.rawParts) {
         return {
-          role: msg.role === 'model' ? 'model' : 'user',
+          role: msg.role === "model" ? "model" : "user",
           parts: msg.rawParts,
         };
       }
+
       return {
-        role: msg.role === 'model' ? 'model' : 'user',
-        parts: [{ text: msg.content || '' }],
+        role: msg.role === "model" ? "model" : "user",
+        parts: [
+          {
+            text: msg.content || "",
+          },
+        ],
       };
     });
 
     const modelsToTry = [this.primaryModel, ...this.fallbackModels];
+
     let lastError: any;
 
     for (const model of modelsToTry) {
       const maxRetries = 2;
+
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
           const response = await this.ai.models.generateContent({
@@ -101,41 +172,44 @@ export class GeminiProvider implements LLMProvider {
           });
 
           const candidate = response.candidates?.[0];
+
           const functionCalls = response.functionCalls;
 
           if (functionCalls && functionCalls.length > 0) {
             return {
-              toolCalls: functionCalls.map((fc) => ({
-                id: fc.id,
-                name: fc.name || '',
-                args: (fc.args as Record<string, any>) || {},
+              toolCalls: functionCalls.map((functionCall) => ({
+                id: functionCall.id,
+                name: functionCall.name || "",
+                args: (functionCall.args as Record<string, any>) || {},
               })),
               rawResponse: candidate?.content,
             };
           }
 
           return {
-            text: response.text ?? '',
+            text: response.text ?? "",
             rawResponse: candidate?.content,
           };
         } catch (error: any) {
           lastError = error;
+
           const errorMessage = error?.message || String(error);
+
           const isQuotaOrTransient =
-            errorMessage.includes('429') ||
-            errorMessage.includes('RESOURCE_EXHAUSTED') ||
-            errorMessage.includes('503') ||
-            errorMessage.includes('UNAVAILABLE');
+            errorMessage.includes("429") ||
+            errorMessage.includes("RESOURCE_EXHAUSTED") ||
+            errorMessage.includes("503") ||
+            errorMessage.includes("UNAVAILABLE");
 
           if (isQuotaOrTransient) {
             console.warn(
-              `⚠️ [GeminiProvider] Model "${model}" mengalami kendala quota/server (429/503). Mencoba model alternatif...`
+              `⚠️ [GeminiProvider] Model "${model}" mengalami kendala quota/server (429/503). Mencoba model alternatif...`,
             );
-            // Pindah ke model berikutnya jika quota habis
+
             break;
-          } else {
-            throw error;
           }
+
+          throw error;
         }
       }
     }

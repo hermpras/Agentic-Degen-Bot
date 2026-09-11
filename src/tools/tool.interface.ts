@@ -2,13 +2,23 @@ export type ToolRiskLevel = "SAFE" | "APPROVAL" | "STRONG_APPROVAL";
 
 export interface ToolParameterProperty {
   type: "string" | "number" | "boolean" | "object" | "array";
-  description: string;
+
+  description?: string;
+
   enum?: string[];
+
+  items?: ToolParameterProperty;
+
+  properties?: Record<string, ToolParameterProperty>;
+
+  required?: string[];
 }
 
 export interface ToolParameters {
   type: "object";
+
   properties: Record<string, ToolParameterProperty>;
+
   required?: string[];
 }
 
@@ -39,12 +49,12 @@ export interface Tool {
   riskLevel: ToolRiskLevel;
 
   /**
-   * Skema parameter yang dibutuhkan oleh tool
+   * Skema parameter yang dibutuhkan oleh LLM.
    */
   parameters?: ToolParameters;
 
   /**
-   * Fungsi eksekusi utama yang menjalankan logika tool
+   * Fungsi eksekusi utama yang menjalankan logika tool.
    */
   execute(args: Record<string, any>): Promise<any>;
 }
