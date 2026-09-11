@@ -27,35 +27,39 @@ import { addToWatchlistTool } from "../tools/impl/add-to-watchlist.tool.js";
 import { updateProjectTool } from "../tools/impl/update-project.tool.js";
 import { updateWatchlistTool } from "../tools/impl/update-watchlist.tool.js";
 
+import { createProjectTaskPlanTool } from "../tools/impl/create-project-task-plan.tool.js";
+
 export interface AgentProfile {
   /**
-   * Nama unik agent, dipakai orchestrator buat routing
+   * Nama unik agent, dipakai orchestrator buat routing.
    */
   name: string;
 
   /**
-   * Deskripsi buat orchestrator milih agent mana yang cocok
-   * untuk sebuah pesan
+   * Deskripsi buat orchestrator memilih agent
+   * yang paling cocok untuk sebuah pesan.
    */
   description: string;
 
   /**
-   * Instance agent
+   * Instance agent.
    */
   agent: Agent;
 
   /**
-   * Approval manager yang dipakai oleh ToolRegistry agent ini
+   * Approval manager yang dipakai oleh ToolRegistry
+   * agent ini.
    */
   approvalManager: ApprovalManager;
 }
 
 /**
- * Bikin semua Agent instance yang tersedia, masing-masing
- * dengan tool & system prompt sendiri.
+ * Membuat semua Agent instance yang tersedia.
  *
- * Tambah agent baru di sini kalau mau nambah specialized agent lain
- * (Research, Web3, dst).
+ * Setiap agent mempunyai:
+ * - system instruction sendiri
+ * - tool registry sendiri
+ * - approval manager sendiri
  */
 export function buildAgentProfiles(
   provider: LLMProvider,
@@ -69,7 +73,9 @@ export function buildAgentProfiles(
   const generalTools = new ToolRegistry();
 
   generalTools.register(getCurrentTimeTool);
+
   generalTools.register(webSearchTool);
+
   generalTools.register(browsePageTool);
 
   const generalAgent = new Agent(provider, generalTools, {
@@ -88,29 +94,63 @@ export function buildAgentProfiles(
 
   const devTools = new ToolRegistry();
 
+  // General / development tools
+
   devTools.register(getCurrentTimeTool);
+
   devTools.register(readFileTool);
+
   devTools.register(writeFileTool);
 
   devTools.register(githubReadFileTool);
+
   devTools.register(githubListDirectoryTool);
+
   devTools.register(githubGetRecentCommitsTool);
+
   devTools.register(githubGetWorkflowStatusTool);
 
   devTools.register(browsePageTool);
 
+  // ============================================================
   // Account tools
+  // ============================================================
+
   devTools.register(createAccountTool);
+
   devTools.register(listAccountsTool);
+
   devTools.register(updateAccountTool);
+
   devTools.register(renameAccountTool);
 
-  // Project tools
+  // ============================================================
+  // Project / Watchlist tools
+  // ============================================================
+
   devTools.register(createProjectTool);
+
   devTools.register(listProjectsTool);
+
   devTools.register(addToWatchlistTool);
+
   devTools.register(updateProjectTool);
+
   devTools.register(updateWatchlistTool);
+
+  // ============================================================
+  // Project Task Workflow
+  // ============================================================
+
+  /*
+   * Tool ini hanya membuat task plan.
+   *
+   * BELUM mengeksekusi task.
+   * Actual execution akan kita sambungkan
+   * setelah approval boundary siap.
+   */
+
+  devTools.register(createProjectTaskPlanTool(database));
 
   const devAgent = new Agent(provider, devTools, {
     memoryManager,
@@ -121,9 +161,24 @@ export function buildAgentProfiles(
       "development project HoodBear, mengelola account whitelist, " +
       "dan mengelola project whitelist/watchlist. " +
       "Untuk account, kamu bisa membuat, melihat, memperbarui, " +
-      "dan rename account. Untuk project, kamu bisa mendaftarkan " +
-      "project baru ke database. Kamu mengingat riwayat percakapan sebelumnya.",
+      "dan rename account. " +
+      "Untuk project, kamu bisa mendaftarkan project baru, " +
+      "melihat project, mengubah informasi project, " +
+      "dan mengelola watchlist. " +
+      "Jika user meminta menyiapkan pekerjaan whitelist atau project, " +
+      "gunakan tool create_project_task_plan untuk membuat task plan " +
+      "berdasarkan requirements dan ACTIVE accounts yang tersedia. " +
+      "create_project_task_plan HANYA membuat rencana task. " +
+      "Tool tersebut TIDAK mengeksekusi task dan TIDAK melakukan submit. " +
+      "Jangan pernah mengklaim sebuah task sudah dikerjakan " +
+      "jika baru membuat task plan. " +
+      "Untuk informasi real-time, gunakan tool yang tersedia. " +
+      "Kamu mengingat riwayat percakapan sebelumnya.",
   });
+
+  // ============================================================
+  // Profiles
+  // ============================================================
 
   return [
     {
@@ -143,7 +198,8 @@ export function buildAgentProfiles(
 
       description:
         "Untuk debugging code, baca/tulis file lokal, cek GitHub, " +
-        "mengelola account whitelist, atau mengelola project dan watchlist.",
+        "mengelola account whitelist, mengelola project/watchlist, " +
+        "dan membuat task plan whitelist/project.",
 
       agent: devAgent,
 
