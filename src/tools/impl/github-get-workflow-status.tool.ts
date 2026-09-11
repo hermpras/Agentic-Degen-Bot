@@ -1,37 +1,42 @@
-import { Tool } from '../tool.interface.js';
-import { getOctokit, handleGithubError } from './github.utils.js';
+import { Tool } from "../tool.interface.js";
+import { getOctokit, handleGithubError } from "./github.utils.js";
 
 export const githubGetWorkflowStatusTool: Tool = {
-  name: 'github_get_workflow_status',
+  name: "github_get_workflow_status",
   description:
-    'Mengecek status eksekusi GitHub Actions workflow / CI build terbaru (status, kesimpulan/conclusion, branch, dan URL log) dari repositori GitHub (Read-Only).',
+    "Mengecek status eksekusi GitHub Actions workflow / CI build terbaru (status, kesimpulan/conclusion, branch, dan URL log) dari repositori GitHub (Read-Only).",
+  riskLevel: "SAFE",
   parameters: {
-    type: 'object',
+    type: "object",
     properties: {
       owner: {
-        type: 'string',
-        description: 'Pemilik repositori',
+        type: "string",
+        description: "Pemilik repositori",
       },
       repo: {
-        type: 'string',
-        description: 'Nama repositori',
+        type: "string",
+        description: "Nama repositori",
       },
       workflow_file: {
-        type: 'string',
-        description: 'Nama file workflow YAML (contoh: "ci.yml" atau "build.yml", opsional)',
+        type: "string",
+        description:
+          'Nama file workflow YAML (contoh: "ci.yml" atau "build.yml", opsional)',
       },
     },
-    required: ['owner', 'repo'],
+    required: ["owner", "repo"],
   },
   async execute(args: Record<string, any>) {
     const { owner, repo, workflow_file } = args;
 
     if (!owner || !repo) {
-      return JSON.stringify({ error: 'Parameter "owner" dan "repo" wajib diisi.' });
+      return JSON.stringify({
+        error: 'Parameter "owner" dan "repo" wajib diisi.',
+      });
     }
 
     try {
       const octokit = getOctokit();
+
       let response: any;
 
       if (workflow_file) {
@@ -53,8 +58,8 @@ export const githubGetWorkflowStatusTool: Tool = {
         id: r.id,
         name: r.name,
         event: r.event,
-        status: r.status, // 'completed' | 'in_progress' | 'queued'
-        conclusion: r.conclusion, // 'success' | 'failure' | 'cancelled' | null
+        status: r.status,
+        conclusion: r.conclusion,
         branch: r.head_branch,
         commitMessage: r.head_commit?.message,
         createdAt: r.created_at,
@@ -64,13 +69,16 @@ export const githubGetWorkflowStatusTool: Tool = {
       return JSON.stringify({
         owner,
         repo,
-        workflowFilter: workflow_file || 'all',
+        workflowFilter: workflow_file || "all",
         totalRunsRetrieved: runs.length,
         latestRun: runs[0] || null,
         recentRuns: runs,
       });
     } catch (error: any) {
-      return handleGithubError(error, `cek workflow status di ${owner}/${repo}`);
+      return handleGithubError(
+        error,
+        `cek workflow status di ${owner}/${repo}`,
+      );
     }
   },
 };

@@ -1,11 +1,13 @@
+export type ToolRiskLevel = "SAFE" | "APPROVAL" | "STRONG_APPROVAL";
+
 export interface ToolParameterProperty {
-  type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+  type: "string" | "number" | "boolean" | "object" | "array";
   description: string;
   enum?: string[];
 }
 
 export interface ToolParameters {
-  type: 'object';
+  type: "object";
   properties: Record<string, ToolParameterProperty>;
   required?: string[];
 }
@@ -20,6 +22,21 @@ export interface Tool {
    * Deskripsi tentang apa fungsi tool ini dan kapan LLM harus menggunakannya
    */
   description: string;
+
+  /**
+   * Tingkat risiko dari aksi yang dilakukan tool.
+   *
+   * SAFE:
+   * Tidak mengubah state atau melakukan aksi sensitif.
+   *
+   * APPROVAL:
+   * Mengubah state / melakukan aksi yang membutuhkan persetujuan user.
+   *
+   * STRONG_APPROVAL:
+   * Aksi sangat sensitif seperti transaksi finansial, signing,
+   * transfer dana, atau aksi irreversible lainnya.
+   */
+  riskLevel: ToolRiskLevel;
 
   /**
    * Skema parameter yang dibutuhkan oleh tool

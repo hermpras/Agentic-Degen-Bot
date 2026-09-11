@@ -1,20 +1,21 @@
-import { Tool } from '../tool.interface.js';
-import { config } from '../../config/index.js';
+import { Tool } from "../tool.interface.js";
+import { config } from "../../config/index.js";
 
 export const webSearchTool: Tool = {
-  name: 'web_search',
+  name: "web_search",
   description:
-    'Melakukan pencarian web secara real-time untuk menemukan informasi terbaru, berita, fakta, peristiwa terkini, atau informasi dari internet.',
+    "Melakukan pencarian web secara real-time untuk menemukan informasi terbaru, berita, fakta, peristiwa terkini, atau informasi dari internet.",
+  riskLevel: "SAFE",
   parameters: {
-    type: 'object',
+    type: "object",
     properties: {
       query: {
-        type: 'string',
+        type: "string",
         description:
           'Kata kunci atau kalimat pencarian web (contoh: "berita terbaru HoodBear", "update harga Solana")',
       },
     },
-    required: ['query'],
+    required: ["query"],
   },
   async execute(args: Record<string, any>) {
     const query = args.query;
@@ -23,35 +24,40 @@ export const webSearchTool: Tool = {
     if (!apiKey) {
       return JSON.stringify({
         error:
-          'TAVILY_API_KEY belum diisi di file .env. Harap isi TAVILY_API_KEY untuk menggunakan pencarian web.',
+          "TAVILY_API_KEY belum diisi di file .env. Harap isi TAVILY_API_KEY untuk menggunakan pencarian web.",
       });
     }
 
-    if (!query || typeof query !== 'string') {
+    if (!query || typeof query !== "string") {
       return JSON.stringify({
-        error: 'Parameter "query" wajib diisi dengan string pencarian yang valid.',
+        error:
+          'Parameter "query" wajib diisi dengan string pencarian yang valid.',
       });
     }
 
     try {
       console.log(`🌐 [WebSearch] Mencari di web via Tavily API: "${query}"`);
 
-      const response = await fetch('https://api.tavily.com/search', {
-        method: 'POST',
+      const response = await fetch("https://api.tavily.com/search", {
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           api_key: apiKey,
           query: query,
-          search_depth: 'basic',
+          search_depth: "basic",
           max_results: 5,
         }),
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`❌ [WebSearch Error] HTTP ${response.status}:`, errorText);
+        console.error(
+          `❌ [WebSearch Error] HTTP ${response.status}:`,
+          errorText,
+        );
+
         return JSON.stringify({
           error: `Gagal menghubungi API Tavily (HTTP ${response.status}).`,
         });
@@ -79,7 +85,8 @@ export const webSearchTool: Tool = {
         results: formattedResults,
       });
     } catch (error: any) {
-      console.error('❌ [WebSearch Exception]:', error);
+      console.error("❌ [WebSearch Exception]:", error);
+
       return JSON.stringify({
         error: `Terjadi kesalahan saat melakukan pencarian web: ${error.message || String(error)}`,
       });
