@@ -106,7 +106,8 @@ export class TaskManager {
         ? input.description?.trim() || null
         : null;
 
-    const stmt = this.database.getDb().prepare(`
+    const stmt = this.database.getDb().prepare(
+      `
       INSERT INTO tasks (
         project_id,
         account_id,
@@ -116,7 +117,8 @@ export class TaskManager {
         status
       )
       VALUES (?, ?, ?, ?, ?, 'PENDING')
-    `);
+    `,
+    );
 
     const result = stmt.run(
       project.id,
@@ -140,7 +142,8 @@ export class TaskManager {
   }
 
   getTaskById(id: number): Task | undefined {
-    const stmt = this.database.getDb().prepare(`
+    const stmt = this.database.getDb().prepare(
+      `
       SELECT
         t.id,
         t.project_id,
@@ -163,7 +166,8 @@ export class TaskManager {
         ON a.id = t.account_id
       WHERE t.id = ?
       LIMIT 1
-    `);
+    `,
+    );
 
     const row = stmt.get(id) as TaskRow | undefined;
 
@@ -192,7 +196,8 @@ export class TaskManager {
     const whereClause =
       conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-    const stmt = this.database.getDb().prepare(`
+    const stmt = this.database.getDb().prepare(
+      `
       SELECT
         t.id,
         t.project_id,
@@ -215,7 +220,8 @@ export class TaskManager {
         ON a.id = t.account_id
       ${whereClause}
       ORDER BY t.id ASC
-    `);
+    `,
+    );
 
     const rows = stmt.all(...params) as TaskRow[];
 
@@ -265,7 +271,8 @@ export class TaskManager {
         ? (existing.completedAt ?? new Date().toISOString())
         : null;
 
-    const stmt = this.database.getDb().prepare(`
+    const stmt = this.database.getDb().prepare(
+      `
       UPDATE tasks
       SET
         task_type = ?,
@@ -277,7 +284,8 @@ export class TaskManager {
         completed_at = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `);
+    `,
+    );
 
     stmt.run(
       taskType,
@@ -299,6 +307,18 @@ export class TaskManager {
     }
 
     return updated;
+  }
+
+  saveTaskProof(id: number, proof: string): Task | undefined {
+    const normalizedProof = proof.trim();
+
+    if (!normalizedProof) {
+      throw new Error("Task proof tidak boleh kosong.");
+    }
+
+    return this.updateTask(id, {
+      proof: normalizedProof,
+    });
   }
 
   markTaskInProgress(id: number): Task | undefined {
@@ -331,10 +351,12 @@ export class TaskManager {
   }
 
   deleteTask(id: number): boolean {
-    const stmt = this.database.getDb().prepare(`
+    const stmt = this.database.getDb().prepare(
+      `
       DELETE FROM tasks
       WHERE id = ?
-    `);
+    `,
+    );
 
     const result = stmt.run(id);
 
