@@ -31,6 +31,10 @@ export class Agent {
       options?.systemInstruction ?? DEFAULT_SYSTEM_INSTRUCTION;
   }
 
+  getToolRegistry(): ToolRegistry {
+    return this.toolRegistry;
+  }
+
   /**
    * Memproses pesan pengguna melalui Reasoning Loop
    * dengan memuat & menyimpan riwayat percakapan.
