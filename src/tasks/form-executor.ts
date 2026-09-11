@@ -9,7 +9,11 @@ import {
   PlannedForm,
   PlannedFormCheckbox,
 } from "./task-planner.js";
-import { FieldMapper, FieldMapping } from "./field-mapper.js";
+import { FieldMapper } from "./field-mapper.js";
+import {
+  FieldMappingResolver,
+  FieldMappingResolution,
+} from "./field-mapping-resolver.js";
 
 export interface FormExecutionResult {
   formType: PlannedForm["formType"];
@@ -23,14 +27,18 @@ export interface FormExecutionResult {
 export class FormExecutor {
   private readonly inspector?: FormInspector;
   private readonly mapper?: FieldMapper;
+  private readonly resolver?: FieldMappingResolver;
 
   constructor(
     private readonly browser: BrowserExecutor,
     inspector?: FormInspector,
     mapper?: FieldMapper,
+    resolver?: FieldMappingResolver,
   ) {
     this.inspector = inspector;
     this.mapper = mapper;
+    this.resolver =
+      resolver ?? (mapper ? new FieldMappingResolver(mapper) : undefined);
   }
 
   async openForm(form: PlannedForm): Promise<string> {
@@ -41,6 +49,7 @@ export class FormExecutor {
     const result = await this.browser.open(form.targetUrl);
 
     console.log(`📝 [FormExecutor] Form opened: ${result.url}`);
+
     console.log(`📝 [FormExecutor] Form title: ${result.title}`);
 
     return result.text;
@@ -68,7 +77,6 @@ export class FormExecutor {
 
     let inspectedFields: InspectedField[] = [];
     let inspectedCheckboxes: InspectedCheckbox[] = [];
-    let fieldMappings: FieldMapping[] = [];
 
     if (this.inspector) {
       const inspection = await this.inspector.inspect();
@@ -79,20 +87,6 @@ export class FormExecutor {
       console.log(
         `🔎 [FormExecutor] Using structured inspection: ${inspectedFields.length} fields, ${inspectedCheckboxes.length} checkboxes.`,
       );
-
-      if (this.mapper) {
-        fieldMappings = this.mapper.mapFields(inspectedFields);
-
-        console.log(
-          `🧠 [FormExecutor] Automatic field mapping: ${fieldMappings.length} fields mapped.`,
-        );
-
-        for (const mapping of fieldMappings) {
-          console.log(
-            `🧠 [FormExecutor] ${mapping.field.label ?? mapping.field.name ?? mapping.field.id ?? `field-${mapping.field.index}`} → ${mapping.mappedType} (confidence=${mapping.confidence})`,
-          );
-        }
-      }
     }
 
     const usedFieldIndexes = new Set<number>();
@@ -108,11 +102,10 @@ export class FormExecutor {
         continue;
       }
 
-      const inspectedField = this.findMatchingField(
+      const inspectedField = await this.resolveField(
         field.type,
         field.label,
         inspectedFields,
-        fieldMappings,
         usedFieldIndexes,
       );
 
@@ -164,20 +157,19 @@ export class FormExecutor {
     };
   }
 
-  private findMatchingField(
+  private async resolveField(
     type: FormFieldType,
     label: string | null,
     fields: InspectedField[],
-    mappings: FieldMapping[],
     usedFieldIndexes: Set<number>,
-  ): InspectedField | undefined {
-    if (fields.length === 0) {
-      return undefined;
-    }
-
+  ): Promise<InspectedField | undefined> {
     const availableFields = fields.filter(
       (field) => !usedFieldIndexes.has(field.index),
     );
+
+    if (availableFields.length === 0) {
+      return undefined;
+    }
 
     const normalizedLabel = this.normalizeText(label);
 
@@ -185,23 +177,32 @@ export class FormExecutor {
      * Priority 1:
      * Exact label match.
      *
-     * Kalau planner sudah memberikan label yang sangat spesifik,
-     * kita percaya label tersebut terlebih dahulu.
+     * Exact match dianggap deterministic.
      */
     if (normalizedLabel) {
-      const exactLabel = availableFields.find(
+      const exactLabel = availableFields.filter(
         (field) => this.normalizeText(field.label) === normalizedLabel,
       );
 
-      if (exactLabel) {
-        return exactLabel;
+      if (exactLabel.length === 1) {
+        return exactLabel[0];
+      }
+
+      if (exactLabel.length > 1) {
+        throw new Error(
+          this.buildDirectLabelAmbiguousError(type, exactLabel, "exact"),
+        );
       }
 
       /*
        * Priority 2:
        * Partial label match.
+       *
+       * Partial match TIDAK boleh langsung memilih
+       * candidate pertama. Kalau ada lebih dari satu,
+       * harus dianggap ambiguous.
        */
-      const partialLabel = availableFields.find((field) => {
+      const partialLabel = availableFields.filter((field) => {
         const fieldLabel = this.normalizeText(field.label);
 
         if (!fieldLabel) {
@@ -214,54 +215,175 @@ export class FormExecutor {
         );
       });
 
-      if (partialLabel) {
-        return partialLabel;
+      if (partialLabel.length === 1) {
+        console.log(
+          `🔎 [FormExecutor] Unique partial label match selected: ${this.getFieldDisplayName(
+            partialLabel[0],
+          )}`,
+        );
+
+        return partialLabel[0];
+      }
+
+      if (partialLabel.length > 1) {
+        throw new Error(
+          this.buildDirectLabelAmbiguousError(type, partialLabel, "partial"),
+        );
       }
     }
 
     /*
      * Priority 3:
-     * Automatic FieldMapper.
+     * FieldMappingResolver.
      *
-     * Hanya mapping dengan confidence >= 80
-     * yang boleh digunakan otomatis.
+     * Resolver menentukan apakah automatic mapping
+     * berdasarkan semantic field type aman digunakan.
      */
-    if (this.mapper) {
-      const mappedCandidate = mappings
-        .filter(
-          (mapping) =>
-            mapping.mappedType === type &&
-            mapping.confidence >= 80 &&
-            !usedFieldIndexes.has(mapping.field.index),
-        )
-        .sort((a, b) => b.confidence - a.confidence)[0];
+    if (this.resolver) {
+      const resolution = this.resolver.resolve(
+        type,
+        availableFields,
+        usedFieldIndexes,
+      );
 
-      if (mappedCandidate) {
+      if (resolution.status === "MATCH") {
         console.log(
-          `🧠 [FormExecutor] Automatic mapping selected: ${mappedCandidate.field.label ?? mappedCandidate.field.name ?? mappedCandidate.field.id ?? `field-${mappedCandidate.field.index}`} → ${type} (confidence=${mappedCandidate.confidence})`,
+          `🧠 [FormExecutor] Automatic mapping selected: ${this.getFieldDisplayName(
+            resolution.mapping.field,
+          )} → ${type} (confidence=${resolution.mapping.confidence})`,
         );
 
-        return mappedCandidate.field;
+        return resolution.mapping.field;
       }
+
+      if (resolution.status === "AMBIGUOUS") {
+        throw new Error(this.buildAmbiguousFieldError(type, resolution));
+      }
+
+      if (resolution.status === "LOW_CONFIDENCE") {
+        throw new Error(this.buildLowConfidenceFieldError(type, resolution));
+      }
+
+      /*
+       * NOT_FOUND:
+       * lanjut ke fallback heuristic.
+       */
     }
 
     /*
      * Priority 4:
-     * Existing keyword heuristic.
-     *
-     * Ini tetap dipertahankan sebagai fallback.
+     * Existing heuristic fallback.
      */
     const keywords = this.getFieldKeywords(type);
 
-    const keywordMatch = availableFields.find((field) =>
+    const keywordMatches = availableFields.filter((field) =>
       this.fieldContainsKeyword(field, keywords),
     );
 
-    if (keywordMatch) {
-      return keywordMatch;
+    if (keywordMatches.length === 1) {
+      console.log(
+        `🔎 [FormExecutor] Fallback heuristic selected: ${this.getFieldDisplayName(
+          keywordMatches[0],
+        )} → ${type}`,
+      );
+
+      return keywordMatches[0];
+    }
+
+    if (keywordMatches.length > 1) {
+      throw new Error(this.buildHeuristicAmbiguousError(type, keywordMatches));
     }
 
     return undefined;
+  }
+
+  private buildDirectLabelAmbiguousError(
+    type: FormFieldType,
+    candidates: InspectedField[],
+    matchType: "exact" | "partial",
+  ): string {
+    const candidateText = candidates
+      .map(
+        (candidate) =>
+          `"${this.getFieldDisplayName(
+            candidate,
+          )}" (selector=${candidate.selector})`,
+      )
+      .join(", ");
+
+    return [
+      `Direct ${matchType} label mapping untuk "${type}" dihentikan karena ambigu.`,
+      `Candidates: ${candidateText}.`,
+      "Form tidak diisi untuk field ini.",
+      "Diperlukan keputusan eksplisit sebelum melanjutkan.",
+    ].join(" ");
+  }
+
+  private buildHeuristicAmbiguousError(
+    type: FormFieldType,
+    candidates: InspectedField[],
+  ): string {
+    const candidateText = candidates
+      .map(
+        (candidate) =>
+          `"${this.getFieldDisplayName(
+            candidate,
+          )}" (selector=${candidate.selector})`,
+      )
+      .join(", ");
+
+    return [
+      `Fallback heuristic untuk "${type}" dihentikan karena ambigu.`,
+      `Candidates: ${candidateText}.`,
+      "Form tidak diisi untuk field ini.",
+      "Diperlukan keputusan eksplisit sebelum melanjutkan.",
+    ].join(" ");
+  }
+
+  private buildAmbiguousFieldError(
+    type: FormFieldType,
+    resolution: Extract<FieldMappingResolution, { status: "AMBIGUOUS" }>,
+  ): string {
+    const candidates = resolution.candidates
+      .map(
+        (candidate) =>
+          `"${this.getFieldDisplayName(
+            candidate.field,
+          )}" (confidence=${candidate.confidence}, selector=${candidate.field.selector})`,
+      )
+      .join(", ");
+
+    return [
+      `Automatic mapping untuk "${type}" dihentikan karena ambigu.`,
+      `Candidates: ${candidates}.`,
+      "Form tidak diisi untuk field ini.",
+      "Diperlukan keputusan eksplisit sebelum melanjutkan.",
+    ].join(" ");
+  }
+
+  private buildLowConfidenceFieldError(
+    type: FormFieldType,
+    resolution: Extract<FieldMappingResolution, { status: "LOW_CONFIDENCE" }>,
+  ): string {
+    const candidates = resolution.candidates
+      .map(
+        (candidate) =>
+          `"${this.getFieldDisplayName(
+            candidate.field,
+          )}" (confidence=${candidate.confidence})`,
+      )
+      .join(", ");
+
+    return [
+      `Automatic mapping untuk "${type}" dihentikan karena confidence terlalu rendah.`,
+      `Candidates: ${candidates}.`,
+      "Form tidak diisi untuk field ini.",
+      "Diperlukan keputusan eksplisit sebelum melanjutkan.",
+    ].join(" ");
+  }
+
+  private getFieldDisplayName(field: InspectedField): string {
+    return field.label ?? field.name ?? field.id ?? `field-${field.index}`;
   }
 
   private findMatchingCheckbox(
@@ -319,7 +441,9 @@ export class FormExecutor {
     value: string,
   ): Promise<void> {
     console.log(
-      `✏️ [FormExecutor] Filling inspected ${field.kind} "${field.label ?? field.name ?? field.id ?? field.index}" using ${field.selector}`,
+      `✏️ [FormExecutor] Filling inspected ${field.kind} "${this.getFieldDisplayName(
+        field,
+      )}" using ${field.selector}`,
     );
 
     await this.browser.fill(field.selector, value);
