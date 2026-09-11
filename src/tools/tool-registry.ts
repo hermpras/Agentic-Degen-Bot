@@ -1,12 +1,18 @@
+import { ApprovalManager } from "../approval/approval-manager.js";
 import { PolicyEngine } from "../policy/policy-engine.js";
 import { Tool } from "./tool.interface.js";
 
 export class ToolRegistry {
   private tools: Map<string, Tool> = new Map();
   private policyEngine: PolicyEngine;
+  private approvalManager: ApprovalManager;
 
-  constructor(policyEngine: PolicyEngine = new PolicyEngine()) {
+  constructor(
+    policyEngine: PolicyEngine = new PolicyEngine(),
+    approvalManager: ApprovalManager = new ApprovalManager(),
+  ) {
     this.policyEngine = policyEngine;
+    this.approvalManager = approvalManager;
   }
 
   register(tool: Tool): void {
@@ -27,6 +33,10 @@ export class ToolRegistry {
     return Array.from(this.tools.values());
   }
 
+  getApprovalManager(): ApprovalManager {
+    return this.approvalManager;
+  }
+
   async executeTool(name: string, args: Record<string, any>): Promise<string> {
     const tool = this.getTool(name);
 
@@ -41,13 +51,21 @@ export class ToolRegistry {
     );
 
     if (policy.decision !== "ALLOW") {
+      const approvalRequest = this.approvalManager.createRequest(
+        name,
+        args,
+        tool.riskLevel,
+      );
+
       console.warn(
-        `⛔ [ToolRegistry] Tool "${name}" ditahan oleh policy: ${policy.reason}`,
+        `⛔ [ToolRegistry] Tool "${name}" ditahan. Approval ID: ${approvalRequest.id}`,
       );
 
       return JSON.stringify({
         success: false,
         blocked: true,
+        requiresApproval: true,
+        approvalId: approvalRequest.id,
         tool: name,
         riskLevel: tool.riskLevel,
         decision: policy.decision,
