@@ -9,6 +9,7 @@ import {
   PlannedForm,
   PlannedFormCheckbox,
 } from "./task-planner.js";
+import { FieldMapper, FieldMapping } from "./field-mapper.js";
 
 export interface FormExecutionResult {
   formType: PlannedForm["formType"];
@@ -21,12 +22,15 @@ export interface FormExecutionResult {
 
 export class FormExecutor {
   private readonly inspector?: FormInspector;
+  private readonly mapper?: FieldMapper;
 
   constructor(
     private readonly browser: BrowserExecutor,
     inspector?: FormInspector,
+    mapper?: FieldMapper,
   ) {
     this.inspector = inspector;
+    this.mapper = mapper;
   }
 
   async openForm(form: PlannedForm): Promise<string> {
@@ -37,7 +41,6 @@ export class FormExecutor {
     const result = await this.browser.open(form.targetUrl);
 
     console.log(`📝 [FormExecutor] Form opened: ${result.url}`);
-
     console.log(`📝 [FormExecutor] Form title: ${result.title}`);
 
     return result.text;
@@ -65,6 +68,7 @@ export class FormExecutor {
 
     let inspectedFields: InspectedField[] = [];
     let inspectedCheckboxes: InspectedCheckbox[] = [];
+    let fieldMappings: FieldMapping[] = [];
 
     if (this.inspector) {
       const inspection = await this.inspector.inspect();
@@ -75,7 +79,23 @@ export class FormExecutor {
       console.log(
         `🔎 [FormExecutor] Using structured inspection: ${inspectedFields.length} fields, ${inspectedCheckboxes.length} checkboxes.`,
       );
+
+      if (this.mapper) {
+        fieldMappings = this.mapper.mapFields(inspectedFields);
+
+        console.log(
+          `🧠 [FormExecutor] Automatic field mapping: ${fieldMappings.length} fields mapped.`,
+        );
+
+        for (const mapping of fieldMappings) {
+          console.log(
+            `🧠 [FormExecutor] ${mapping.field.label ?? mapping.field.name ?? mapping.field.id ?? `field-${mapping.field.index}`} → ${mapping.mappedType} (confidence=${mapping.confidence})`,
+          );
+        }
+      }
     }
+
+    const usedFieldIndexes = new Set<number>();
 
     for (const field of form.fields) {
       if (field.value === null) {
@@ -92,10 +112,14 @@ export class FormExecutor {
         field.type,
         field.label,
         inspectedFields,
+        fieldMappings,
+        usedFieldIndexes,
       );
 
       if (inspectedField) {
         await this.fillInspectedField(inspectedField, field.value);
+
+        usedFieldIndexes.add(inspectedField.index);
       } else {
         await this.fillField(field.type, field.label, field.value);
       }
@@ -144,15 +168,28 @@ export class FormExecutor {
     type: FormFieldType,
     label: string | null,
     fields: InspectedField[],
+    mappings: FieldMapping[],
+    usedFieldIndexes: Set<number>,
   ): InspectedField | undefined {
     if (fields.length === 0) {
       return undefined;
     }
 
+    const availableFields = fields.filter(
+      (field) => !usedFieldIndexes.has(field.index),
+    );
+
     const normalizedLabel = this.normalizeText(label);
 
+    /*
+     * Priority 1:
+     * Exact label match.
+     *
+     * Kalau planner sudah memberikan label yang sangat spesifik,
+     * kita percaya label tersebut terlebih dahulu.
+     */
     if (normalizedLabel) {
-      const exactLabel = fields.find(
+      const exactLabel = availableFields.find(
         (field) => this.normalizeText(field.label) === normalizedLabel,
       );
 
@@ -160,8 +197,16 @@ export class FormExecutor {
         return exactLabel;
       }
 
-      const partialLabel = fields.find((field) => {
+      /*
+       * Priority 2:
+       * Partial label match.
+       */
+      const partialLabel = availableFields.find((field) => {
         const fieldLabel = this.normalizeText(field.label);
+
+        if (!fieldLabel) {
+          return false;
+        }
 
         return (
           fieldLabel.includes(normalizedLabel) ||
@@ -174,9 +219,41 @@ export class FormExecutor {
       }
     }
 
+    /*
+     * Priority 3:
+     * Automatic FieldMapper.
+     *
+     * Hanya mapping dengan confidence >= 80
+     * yang boleh digunakan otomatis.
+     */
+    if (this.mapper) {
+      const mappedCandidate = mappings
+        .filter(
+          (mapping) =>
+            mapping.mappedType === type &&
+            mapping.confidence >= 80 &&
+            !usedFieldIndexes.has(mapping.field.index),
+        )
+        .sort((a, b) => b.confidence - a.confidence)[0];
+
+      if (mappedCandidate) {
+        console.log(
+          `🧠 [FormExecutor] Automatic mapping selected: ${mappedCandidate.field.label ?? mappedCandidate.field.name ?? mappedCandidate.field.id ?? `field-${mappedCandidate.field.index}`} → ${type} (confidence=${mappedCandidate.confidence})`,
+        );
+
+        return mappedCandidate.field;
+      }
+    }
+
+    /*
+     * Priority 4:
+     * Existing keyword heuristic.
+     *
+     * Ini tetap dipertahankan sebagai fallback.
+     */
     const keywords = this.getFieldKeywords(type);
 
-    const keywordMatch = fields.find((field) =>
+    const keywordMatch = availableFields.find((field) =>
       this.fieldContainsKeyword(field, keywords),
     );
 
@@ -208,6 +285,10 @@ export class FormExecutor {
 
       const partialLabel = checkboxes.find((checkbox) => {
         const checkboxLabel = this.normalizeText(checkbox.label);
+
+        if (!checkboxLabel) {
+          return false;
+        }
 
         return (
           checkboxLabel.includes(normalizedLabel) ||
