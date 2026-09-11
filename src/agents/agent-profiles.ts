@@ -22,6 +22,7 @@ import { updateAccountTool } from "../tools/impl/update-account.tool.js";
 import { renameAccountTool } from "../tools/impl/rename-account.tool.js";
 
 import { createProjectTool } from "../tools/impl/create-project.tool.js";
+import { listProjectsTool } from "../tools/impl/list-projects.tool.js";
 
 export interface AgentProfile {
   /**
@@ -103,6 +104,7 @@ export function buildAgentProfiles(
 
   // Project tools
   devTools.register(createProjectTool);
+  devTools.register(listProjectsTool);
 
   const devAgent = new Agent(provider, devTools, {
     memoryManager,
