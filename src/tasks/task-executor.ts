@@ -24,6 +24,11 @@ export interface TaskExecutionReport {
   results: TaskExecutionResult[];
 }
 
+interface TaskActionResult {
+  output: string | null;
+  status?: TaskStatus;
+}
+
 export class TaskExecutor {
   private readonly taskManager: TaskManager;
   private readonly xActionExecutor: XActionExecutor;
@@ -35,9 +40,7 @@ export class TaskExecutor {
     formExecutor?: FormExecutor,
   ) {
     this.taskManager = new TaskManager(database);
-
     this.xActionExecutor = xActionExecutor ?? new XActionExecutor();
-
     this.formExecutor = formExecutor;
   }
 
@@ -75,7 +78,6 @@ export class TaskExecutor {
     completedPlanTaskIds = new Set<string>(),
   ): Promise<TaskExecutionResult> {
     console.log("");
-
     console.log(
       `⚙️ [TaskExecutor] Executing ${task.taskType} → ${task.projectName} / ${task.accountName}`,
     );
@@ -104,7 +106,24 @@ export class TaskExecutor {
 
       this.taskManager.markTaskInProgress(databaseTaskId);
 
-      const actionResult = await this.executeTaskAction(task);
+      const actionResult = await this.executeTaskAction(task, databaseTaskId);
+
+      if (actionResult.status === "IN_PROGRESS") {
+        console.log(
+          `⏸️ [TaskExecutor] Task masih IN_PROGRESS: ${task.planTaskId}`,
+        );
+
+        return {
+          planTaskId: task.planTaskId,
+          taskId: databaseTaskId,
+          projectName: task.projectName,
+          accountName: task.accountName,
+          taskType: task.taskType,
+          status: "IN_PROGRESS",
+          output: actionResult.output,
+          error: null,
+        };
+      }
 
       this.taskManager.markTaskDone(
         databaseTaskId,
@@ -127,7 +146,6 @@ export class TaskExecutor {
       const message = error instanceof Error ? error.message : String(error);
 
       console.error(`❌ [TaskExecutor] Task FAILED: ${task.planTaskId}`);
-
       console.error(message);
 
       if (databaseTaskId !== null) {
@@ -147,9 +165,10 @@ export class TaskExecutor {
     }
   }
 
-  private async executeTaskAction(task: PlannedTask): Promise<{
-    output: string | null;
-  }> {
+  private async executeTaskAction(
+    task: PlannedTask,
+    databaseTaskId: number,
+  ): Promise<TaskActionResult> {
     if (this.isXAction(task.taskType)) {
       return this.executeXAction(task);
     }
@@ -162,10 +181,10 @@ export class TaskExecutor {
       case "FORM_TWITTER":
       case "FORM_WALLET":
       case "FORM_SUBMIT":
-        return this.executeFormTask(task);
+        return this.executeFormTask(task, databaseTaskId);
 
       case "WHITELIST":
-        return this.executeWhitelistTask(task);
+        return this.executeWhitelistTask(task, databaseTaskId);
 
       case "CUSTOM":
         return this.executeCustomTask(task);
@@ -177,9 +196,7 @@ export class TaskExecutor {
     }
   }
 
-  private async executeXAction(task: PlannedTask): Promise<{
-    output: string | null;
-  }> {
+  private async executeXAction(task: PlannedTask): Promise<TaskActionResult> {
     console.log(`𝕏 [TaskExecutor] Routing ${task.taskType} → XActionExecutor`);
 
     const result: XActionResult = await this.xActionExecutor.execute(task);
@@ -190,12 +207,11 @@ export class TaskExecutor {
 
     return {
       output: result.output,
+      status: "DONE",
     };
   }
 
-  private async executeOpenPage(task: PlannedTask): Promise<{
-    output: string | null;
-  }> {
+  private async executeOpenPage(task: PlannedTask): Promise<TaskActionResult> {
     if (!task.targetUrl) {
       throw new Error(`Task ${task.planTaskId} membutuhkan targetUrl.`);
     }
@@ -219,15 +235,17 @@ export class TaskExecutor {
           null,
           2,
         ),
+        status: "DONE",
       };
     } finally {
       await browser.close();
     }
   }
 
-  private async executeFormTask(task: PlannedTask): Promise<{
-    output: string | null;
-  }> {
+  private async executeFormTask(
+    task: PlannedTask,
+    databaseTaskId: number,
+  ): Promise<TaskActionResult> {
     if (!task.form) {
       throw new Error(
         `Task ${task.planTaskId} adalah form task tetapi konfigurasi form tidak tersedia.`,
@@ -253,23 +271,7 @@ export class TaskExecutor {
 
       const formResult = await injectedFormExecutor.fillForm(task.form);
 
-      return {
-        output: JSON.stringify(
-          {
-            action: "FORM",
-            formType: task.form.formType,
-            targetUrl: task.form.targetUrl,
-            fieldsConfigured: task.form.fields.length,
-            checkboxesConfigured: task.form.checkboxes.length,
-            fieldsFilled: formResult.fieldsFilled,
-            checkboxesChecked: formResult.checkboxesChecked,
-            submitAttempted: formResult.submitAttempted,
-            message: formResult.message,
-          },
-          null,
-          2,
-        ),
-      };
+      return this.handleFormExecutionResult(task, databaseTaskId, formResult);
     }
 
     const browser = new BrowserExecutor({
@@ -287,35 +289,85 @@ export class TaskExecutor {
 
       const formResult = await formExecutor.fillForm(task.form);
 
-      return {
-        output: JSON.stringify(
-          {
-            action: "FORM",
-            formType: task.form.formType,
-            targetUrl: task.form.targetUrl,
-            fieldsConfigured: task.form.fields.length,
-            checkboxesConfigured: task.form.checkboxes.length,
-            fieldsFilled: formResult.fieldsFilled,
-            checkboxesChecked: formResult.checkboxesChecked,
-            submitAttempted: formResult.submitAttempted,
-            message: formResult.message,
-          },
-          null,
-          2,
-        ),
-      };
+      return this.handleFormExecutionResult(task, databaseTaskId, formResult);
     } finally {
       await browser.close();
     }
   }
 
-  private async executeWhitelistTask(task: PlannedTask): Promise<{
-    output: string | null;
-  }> {
+  private handleFormExecutionResult(
+    task: PlannedTask,
+    databaseTaskId: number,
+    formResult: Awaited<ReturnType<FormExecutor["fillForm"]>>,
+  ): TaskActionResult {
+    const proofJson = JSON.stringify(formResult.proof, null, 2);
+
+    /*
+     * Saat ini FormExecutor belum melakukan submit.
+     * Karena itu proof disimpan, tetapi task tetap
+     * IN_PROGRESS.
+     */
+    if (!formResult.submitAttempted) {
+      this.taskManager.saveTaskProof(databaseTaskId, proofJson);
+
+      console.log(
+        `💾 [TaskExecutor] Form execution proof tersimpan untuk task #${databaseTaskId}.`,
+      );
+
+      return {
+        output: JSON.stringify(
+          {
+            action: "FORM",
+            taskId: databaseTaskId,
+            formType: task.form?.formType,
+            targetUrl: task.form?.targetUrl,
+            fieldsConfigured: task.form?.fields.length ?? 0,
+            checkboxesConfigured: task.form?.checkboxes.length ?? 0,
+            fieldsFilled: formResult.fieldsFilled,
+            checkboxesChecked: formResult.checkboxesChecked,
+            submitAttempted: formResult.submitAttempted,
+            executionStatus: formResult.proof.executionStatus,
+            message: formResult.message,
+            proof: formResult.proof,
+          },
+          null,
+          2,
+        ),
+        status: "IN_PROGRESS",
+      };
+    }
+
+    return {
+      output: JSON.stringify(
+        {
+          action: "FORM",
+          taskId: databaseTaskId,
+          formType: task.form?.formType,
+          targetUrl: task.form?.targetUrl,
+          fieldsConfigured: task.form?.fields.length ?? 0,
+          checkboxesConfigured: task.form?.checkboxes.length ?? 0,
+          fieldsFilled: formResult.fieldsFilled,
+          checkboxesChecked: formResult.checkboxesChecked,
+          submitAttempted: formResult.submitAttempted,
+          executionStatus: formResult.proof.executionStatus,
+          message: formResult.message,
+          proof: formResult.proof,
+        },
+        null,
+        2,
+      ),
+      status: "DONE",
+    };
+  }
+
+  private async executeWhitelistTask(
+    task: PlannedTask,
+    databaseTaskId: number,
+  ): Promise<TaskActionResult> {
     console.log(`📝 [TaskExecutor] WHITELIST task: ${task.description}`);
 
     if (task.form) {
-      return this.executeFormTask(task);
+      return this.executeFormTask(task, databaseTaskId);
     }
 
     if (task.targetUrl) {
@@ -334,12 +386,13 @@ export class TaskExecutor {
         null,
         2,
       ),
+      status: "DONE",
     };
   }
 
-  private async executeCustomTask(task: PlannedTask): Promise<{
-    output: string | null;
-  }> {
+  private async executeCustomTask(
+    task: PlannedTask,
+  ): Promise<TaskActionResult> {
     console.log(`🔧 [TaskExecutor] CUSTOM task: ${task.description}`);
 
     return {
@@ -352,17 +405,18 @@ export class TaskExecutor {
         null,
         2,
       ),
+      status: "DONE",
     };
   }
 
   private createDatabaseTask(task: PlannedTask): number {
     const projectStmt = this.database.getDb().prepare(`
-        SELECT id
-        FROM projects
-        WHERE name = ?
-        ORDER BY id ASC
-        LIMIT 1
-      `);
+          SELECT id
+          FROM projects
+          WHERE name = ?
+          ORDER BY id ASC
+          LIMIT 1
+        `);
 
     const project = projectStmt.get(task.projectName) as
       | {
@@ -377,16 +431,16 @@ export class TaskExecutor {
     }
 
     const stmt = this.database.getDb().prepare(`
-        INSERT INTO tasks (
-          project_id,
-          account_id,
-          task_type,
-          target_url,
-          description,
-          status
-        )
-        VALUES (?, ?, ?, ?, ?, 'PENDING')
-      `);
+          INSERT INTO tasks (
+            project_id,
+            account_id,
+            task_type,
+            target_url,
+            description,
+            status
+          )
+          VALUES (?, ?, ?, ?, ?, 'PENDING')
+        `);
 
     const result = stmt.run(
       project.id,
