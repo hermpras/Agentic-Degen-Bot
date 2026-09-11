@@ -125,6 +125,27 @@ export class TaskExecutor {
         };
       }
 
+      if (actionResult.status === "FAILED") {
+        const errorMessage =
+          actionResult.output ?? `Task ${task.planTaskId} gagal dieksekusi.`;
+
+        this.taskManager.markTaskFailed(databaseTaskId, errorMessage);
+
+        console.error(`❌ [TaskExecutor] Task FAILED: ${task.planTaskId}`);
+        console.error(errorMessage);
+
+        return {
+          planTaskId: task.planTaskId,
+          taskId: databaseTaskId,
+          projectName: task.projectName,
+          accountName: task.accountName,
+          taskType: task.taskType,
+          status: "FAILED",
+          output: actionResult.output,
+          error: errorMessage,
+        };
+      }
+
       this.taskManager.markTaskDone(
         databaseTaskId,
         actionResult.output ?? undefined,
@@ -302,62 +323,68 @@ export class TaskExecutor {
   ): TaskActionResult {
     const proofJson = JSON.stringify(formResult.proof, null, 2);
 
-    /*
-     * Saat ini FormExecutor belum melakukan submit.
-     * Karena itu proof disimpan, tetapi task tetap
-     * IN_PROGRESS.
-     */
-    if (!formResult.submitAttempted) {
-      this.taskManager.saveTaskProof(databaseTaskId, proofJson);
+    this.taskManager.saveTaskProof(databaseTaskId, proofJson);
 
-      console.log(
-        `💾 [TaskExecutor] Form execution proof tersimpan untuk task #${databaseTaskId}.`,
-      );
+    console.log(
+      `💾 [TaskExecutor] Form execution proof tersimpan untuk task #${databaseTaskId}.`,
+    );
 
-      return {
-        output: JSON.stringify(
-          {
-            action: "FORM",
-            taskId: databaseTaskId,
-            formType: task.form?.formType,
-            targetUrl: task.form?.targetUrl,
-            fieldsConfigured: task.form?.fields.length ?? 0,
-            checkboxesConfigured: task.form?.checkboxes.length ?? 0,
-            fieldsFilled: formResult.fieldsFilled,
-            checkboxesChecked: formResult.checkboxesChecked,
-            submitAttempted: formResult.submitAttempted,
-            executionStatus: formResult.proof.executionStatus,
-            message: formResult.message,
-            proof: formResult.proof,
-          },
-          null,
-          2,
-        ),
-        status: "IN_PROGRESS",
-      };
+    const output = JSON.stringify(
+      {
+        action: "FORM",
+        taskId: databaseTaskId,
+        formType: task.form?.formType,
+        targetUrl: task.form?.targetUrl,
+        fieldsConfigured: task.form?.fields.length ?? 0,
+        checkboxesConfigured: task.form?.checkboxes.length ?? 0,
+        fieldsFilled: formResult.fieldsFilled,
+        checkboxesChecked: formResult.checkboxesChecked,
+        submitAttempted: formResult.submitAttempted,
+        submitSucceeded: formResult.submitSucceeded,
+        executionStatus: formResult.proof.executionStatus,
+        message: formResult.message,
+        proof: formResult.proof,
+      },
+      null,
+      2,
+    );
+
+    switch (formResult.proof.executionStatus) {
+      case "READY_TO_SUBMIT":
+        console.log(
+          `⏸️ [TaskExecutor] Form siap submit, task tetap IN_PROGRESS: ${task.planTaskId}`,
+        );
+
+        return {
+          output,
+          status: "IN_PROGRESS",
+        };
+
+      case "SUBMITTED":
+        console.log(
+          `✅ [TaskExecutor] Form submit berhasil: ${task.planTaskId}`,
+        );
+
+        return {
+          output,
+          status: "DONE",
+        };
+
+      case "FAILED":
+        console.log(
+          `❌ [TaskExecutor] Form execution FAILED: ${task.planTaskId}`,
+        );
+
+        return {
+          output,
+          status: "FAILED",
+        };
+
+      default:
+        throw new Error(
+          `Execution proof status "${formResult.proof.executionStatus}" tidak dikenali.`,
+        );
     }
-
-    return {
-      output: JSON.stringify(
-        {
-          action: "FORM",
-          taskId: databaseTaskId,
-          formType: task.form?.formType,
-          targetUrl: task.form?.targetUrl,
-          fieldsConfigured: task.form?.fields.length ?? 0,
-          checkboxesConfigured: task.form?.checkboxes.length ?? 0,
-          fieldsFilled: formResult.fieldsFilled,
-          checkboxesChecked: formResult.checkboxesChecked,
-          submitAttempted: formResult.submitAttempted,
-          executionStatus: formResult.proof.executionStatus,
-          message: formResult.message,
-          proof: formResult.proof,
-        },
-        null,
-        2,
-      ),
-      status: "DONE",
-    };
   }
 
   private async executeWhitelistTask(
@@ -411,12 +438,12 @@ export class TaskExecutor {
 
   private createDatabaseTask(task: PlannedTask): number {
     const projectStmt = this.database.getDb().prepare(`
-          SELECT id
-          FROM projects
-          WHERE name = ?
-          ORDER BY id ASC
-          LIMIT 1
-        `);
+        SELECT id
+        FROM projects
+        WHERE name = ?
+        ORDER BY id ASC
+        LIMIT 1
+      `);
 
     const project = projectStmt.get(task.projectName) as
       | {
@@ -431,16 +458,16 @@ export class TaskExecutor {
     }
 
     const stmt = this.database.getDb().prepare(`
-          INSERT INTO tasks (
-            project_id,
-            account_id,
-            task_type,
-            target_url,
-            description,
-            status
-          )
-          VALUES (?, ?, ?, ?, ?, 'PENDING')
-        `);
+        INSERT INTO tasks (
+          project_id,
+          account_id,
+          task_type,
+          target_url,
+          description,
+          status
+        )
+        VALUES (?, ?, ?, ?, ?, 'PENDING')
+      `);
 
     const result = stmt.run(
       project.id,
