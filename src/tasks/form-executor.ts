@@ -92,17 +92,17 @@ export class FormExecutor {
 
     for (const selector of selectors) {
       try {
-        const locatorExists = await this.browser
-          .getText(selector)
-          .catch(() => null);
+        const exists = await this.browser.elementExists(selector);
 
-        if (locatorExists !== null) {
-          await this.browser.fill(selector, value);
-
-          console.log(`✏️ [FormExecutor] Filled ${type} using ${selector}`);
-
-          return;
+        if (!exists) {
+          continue;
         }
+
+        await this.browser.fill(selector, value);
+
+        console.log(`✏️ [FormExecutor] Filled ${type} using ${selector}`);
+
+        return;
       } catch {
         // Try the next selector.
       }
@@ -116,6 +116,12 @@ export class FormExecutor {
 
     for (const selector of selectors) {
       try {
+        const exists = await this.browser.elementExists(selector);
+
+        if (!exists) {
+          continue;
+        }
+
         await this.browser.click(selector);
 
         console.log(
