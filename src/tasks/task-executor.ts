@@ -27,13 +27,18 @@ export interface TaskExecutionReport {
 export class TaskExecutor {
   private readonly taskManager: TaskManager;
   private readonly xActionExecutor: XActionExecutor;
+  private readonly formExecutor?: FormExecutor;
 
   constructor(
     private readonly database: AgentDatabase,
     xActionExecutor?: XActionExecutor,
+    formExecutor?: FormExecutor,
   ) {
     this.taskManager = new TaskManager(database);
+
     this.xActionExecutor = xActionExecutor ?? new XActionExecutor();
+
+    this.formExecutor = formExecutor;
   }
 
   async executePlan(tasks: PlannedTask[]): Promise<TaskExecutionReport> {
@@ -122,6 +127,7 @@ export class TaskExecutor {
       const message = error instanceof Error ? error.message : String(error);
 
       console.error(`❌ [TaskExecutor] Task FAILED: ${task.planTaskId}`);
+
       console.error(message);
 
       if (databaseTaskId !== null) {
@@ -233,6 +239,38 @@ export class TaskExecutor {
     }
 
     console.log(`📝 [TaskExecutor] Form task → ${task.form.targetUrl}`);
+
+    const injectedFormExecutor = this.formExecutor;
+
+    if (injectedFormExecutor) {
+      console.log("🧪 [TaskExecutor] Using injected FormExecutor.");
+
+      const inspection = await injectedFormExecutor.inspectForm(task.form);
+
+      console.log(
+        `🔎 [TaskExecutor] Form inspected (${inspection.length} chars).`,
+      );
+
+      const formResult = await injectedFormExecutor.fillForm(task.form);
+
+      return {
+        output: JSON.stringify(
+          {
+            action: "FORM",
+            formType: task.form.formType,
+            targetUrl: task.form.targetUrl,
+            fieldsConfigured: task.form.fields.length,
+            checkboxesConfigured: task.form.checkboxes.length,
+            fieldsFilled: formResult.fieldsFilled,
+            checkboxesChecked: formResult.checkboxesChecked,
+            submitAttempted: formResult.submitAttempted,
+            message: formResult.message,
+          },
+          null,
+          2,
+        ),
+      };
+    }
 
     const browser = new BrowserExecutor({
       headless: true,
