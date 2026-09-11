@@ -54,6 +54,8 @@ export interface FormCheckboxRequirement {
 export interface FormSubmitRequirement {
   selector?: string;
   label?: string;
+  successSelector?: string;
+  successText?: string;
 }
 
 export interface FormRequirement {
@@ -120,6 +122,8 @@ export interface PlannedFormCheckbox {
 export interface PlannedFormSubmit {
   selector: string | null;
   label: string | null;
+  successSelector: string | null;
+  successText: string | null;
 }
 
 export interface TaskPlan {
@@ -287,6 +291,8 @@ export class TaskPlanner {
 
     const selector = submit.selector?.trim() || null;
     const label = submit.label?.trim() || null;
+    const successSelector = submit.successSelector?.trim() || null;
+    const successText = submit.successText?.trim() || null;
 
     if (!selector && !label) {
       throw new Error(
@@ -297,6 +303,8 @@ export class TaskPlanner {
     return {
       selector,
       label,
+      successSelector,
+      successText,
     };
   }
 

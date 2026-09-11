@@ -1,24 +1,30 @@
 import { BrowserExecutor } from "../browser/browser-executor.js";
+
 import {
   FormInspector,
   InspectedCheckbox,
   InspectedField,
 } from "./form-inspector.js";
+
 import {
   FormFieldType,
   PlannedForm,
   PlannedFormCheckbox,
   PlannedFormSubmit,
 } from "./task-planner.js";
+
 import { FieldMapper } from "./field-mapper.js";
+
 import {
   FieldMappingResolver,
   FieldMappingResolution,
 } from "./field-mapping-resolver.js";
+
 import {
   FormExecutionPlanner,
   FormExecutionPlan,
 } from "./form-execution-planner.js";
+
 import {
   ExecutionProof,
   ExecutionProofBuilder,
@@ -52,12 +58,9 @@ export class FormExecutor {
   ) {
     this.inspector = inspector;
     this.mapper = mapper;
-
     this.resolver =
       resolver ?? (mapper ? new FieldMappingResolver(mapper) : undefined);
-
     this.executionPlanner = executionPlanner ?? new FormExecutionPlanner();
-
     this.proofBuilder = proofBuilder ?? new ExecutionProofBuilder();
   }
 
@@ -79,12 +82,10 @@ export class FormExecutor {
 
     if (this.inspector) {
       const inspection = await this.inspector.inspect();
-
       return inspection.summary;
     }
 
     const pageText = await this.browser.getPageResult();
-
     return pageText.text.slice(0, 5000);
   }
 
@@ -176,6 +177,7 @@ export class FormExecutor {
 
     /*
      * Tidak ada konfigurasi submit.
+     *
      * Form berhenti di READY_TO_SUBMIT.
      */
     if (!form.submit) {
@@ -232,7 +234,12 @@ export class FormExecutor {
     message: string;
   }> {
     const selector = submit.selector?.trim() || null;
+
     const label = submit.label?.trim() || null;
+
+    const successSelector = submit.successSelector?.trim() || null;
+
+    const successText = submit.successText?.trim() || null;
 
     if (!selector && !label) {
       throw new Error(
@@ -244,7 +251,6 @@ export class FormExecutor {
      * Mode A: explicit selector.
      *
      * Selector diberikan langsung oleh planner.
-     * Kita tidak melakukan auto-detection.
      */
     if (selector) {
       const exists = await this.browser.elementExists(selector);
@@ -259,14 +265,11 @@ export class FormExecutor {
 
       await this.browser.click(selector);
 
-      const pageResult = await this.browser.getPageResult();
-
-      return {
-        url: pageResult.url,
-        succeeded: true,
-        message:
-          "Submit berhasil diklik menggunakan explicit selector. Hasil halaman tercatat untuk verifikasi.",
-      };
+      return this.verifySubmission(
+        successSelector,
+        successText,
+        "explicit selector",
+      );
     }
 
     /*
@@ -290,13 +293,104 @@ export class FormExecutor {
 
     await this.browser.click(submitSelector);
 
+    return this.verifySubmission(
+      successSelector,
+      successText,
+      "explicit label",
+    );
+  }
+
+  private async verifySubmission(
+    successSelector: string | null,
+    successText: string | null,
+    submitMode: string,
+  ): Promise<{
+    url: string;
+    succeeded: boolean;
+    message: string;
+  }> {
     const pageResult = await this.browser.getPageResult();
+
+    /*
+     * Backward compatibility:
+     *
+     * Kalau verification belum dikonfigurasi,
+     * behavior lama tetap berlaku:
+     * submit click dianggap berhasil.
+     */
+    if (!successSelector && !successText) {
+      return {
+        url: pageResult.url,
+        succeeded: true,
+        message: `Submit berhasil diklik menggunakan ${submitMode}. Tidak ada success verification yang dikonfigurasi.`,
+      };
+    }
+
+    let selectorVerified = false;
+    let textVerified = false;
+
+    if (successSelector) {
+      selectorVerified = await this.browser.elementExists(successSelector);
+
+      console.log(
+        `🔍 [FormExecutor] Success selector "${successSelector}": ${selectorVerified ? "FOUND" : "NOT FOUND"}`,
+      );
+    }
+
+    if (successText) {
+      const normalizedPageText = this.normalizeText(pageResult.text);
+
+      const normalizedSuccessText = this.normalizeText(successText);
+
+      textVerified =
+        normalizedSuccessText.length > 0 &&
+        normalizedPageText.includes(normalizedSuccessText);
+
+      console.log(
+        `🔍 [FormExecutor] Success text "${successText}": ${textVerified ? "FOUND" : "NOT FOUND"}`,
+      );
+    }
+
+    /*
+     * Kalau salah satu verification berhasil,
+     * submission dianggap terverifikasi.
+     */
+    if (selectorVerified || textVerified) {
+      const verificationMethods: string[] = [];
+
+      if (selectorVerified) {
+        verificationMethods.push(`success selector "${successSelector}"`);
+      }
+
+      if (textVerified) {
+        verificationMethods.push(`success text "${successText}"`);
+      }
+
+      return {
+        url: pageResult.url,
+        succeeded: true,
+        message: `Submit berhasil diklik dan terverifikasi menggunakan ${verificationMethods.join(" dan ")}.`,
+      };
+    }
+
+    /*
+     * Submit sudah diklik, tetapi bukti sukses
+     * tidak ditemukan.
+     */
+    const expectedVerification: string[] = [];
+
+    if (successSelector) {
+      expectedVerification.push(`selector "${successSelector}"`);
+    }
+
+    if (successText) {
+      expectedVerification.push(`text "${successText}"`);
+    }
 
     return {
       url: pageResult.url,
-      succeeded: true,
-      message:
-        "Submit berhasil diklik menggunakan explicit label. Hasil halaman tercatat untuk verifikasi.",
+      succeeded: false,
+      message: `Submit berhasil diklik tetapi verification gagal. Tidak ditemukan ${expectedVerification.join(" atau ")}.`,
     };
   }
 
@@ -842,6 +936,7 @@ export class FormExecutor {
           'input[aria-label*="twitter" i]',
           'input[aria-label*="x handle" i]',
         );
+
         break;
 
       case "WALLET_ADDRESS":
@@ -850,6 +945,7 @@ export class FormExecutor {
           'input[placeholder*="wallet" i]',
           'input[aria-label*="wallet" i]',
         );
+
         break;
 
       case "OWN_TWEET_URL":
@@ -864,6 +960,7 @@ export class FormExecutor {
           'input[aria-label*="post" i]',
           'input[aria-label*="quote" i]',
         );
+
         break;
 
       default:
@@ -892,6 +989,7 @@ export class FormExecutor {
           'label:has-text("follow")',
           'input[type="checkbox"][name*="follow" i]',
         );
+
         break;
 
       case "X_LIKE":
@@ -900,6 +998,7 @@ export class FormExecutor {
           'label:has-text("like")',
           'input[type="checkbox"][name*="like" i]',
         );
+
         break;
 
       case "X_REPOST":
@@ -910,6 +1009,7 @@ export class FormExecutor {
           'input[type="checkbox"][name*="repost" i]',
           'input[type="checkbox"][name*="retweet" i]',
         );
+
         break;
 
       case "X_REPLY":
@@ -918,6 +1018,7 @@ export class FormExecutor {
           'label:has-text("reply")',
           'input[type="checkbox"][name*="reply" i]',
         );
+
         break;
 
       case "X_QUOTE":
@@ -926,6 +1027,7 @@ export class FormExecutor {
           'label:has-text("quote")',
           'input[type="checkbox"][name*="quote" i]',
         );
+
         break;
 
       default:
