@@ -14,6 +14,10 @@ import {
   FieldMappingResolver,
   FieldMappingResolution,
 } from "./field-mapping-resolver.js";
+import {
+  FormExecutionPlanner,
+  FormExecutionPlan,
+} from "./form-execution-planner.js";
 
 export interface FormExecutionResult {
   formType: PlannedForm["formType"];
@@ -28,17 +32,22 @@ export class FormExecutor {
   private readonly inspector?: FormInspector;
   private readonly mapper?: FieldMapper;
   private readonly resolver?: FieldMappingResolver;
+  private readonly executionPlanner: FormExecutionPlanner;
 
   constructor(
     private readonly browser: BrowserExecutor,
     inspector?: FormInspector,
     mapper?: FieldMapper,
     resolver?: FieldMappingResolver,
+    executionPlanner?: FormExecutionPlanner,
   ) {
     this.inspector = inspector;
     this.mapper = mapper;
+
     this.resolver =
       resolver ?? (mapper ? new FieldMappingResolver(mapper) : undefined);
+
+    this.executionPlanner = executionPlanner ?? new FormExecutionPlanner();
   }
 
   async openForm(form: PlannedForm): Promise<string> {
@@ -70,6 +79,26 @@ export class FormExecutor {
   }
 
   async fillForm(form: PlannedForm): Promise<FormExecutionResult> {
+    /*
+     * Step 1:
+     * Validate execution plan BEFORE opening browser.
+     *
+     * Kalau planner mengatakan BLOCKED,
+     * executor tidak boleh menyentuh form.
+     */
+    const executionPlan = this.executionPlanner.plan(form);
+
+    this.logExecutionPlan(executionPlan);
+
+    if (executionPlan.decision !== "READY") {
+      throw new Error(executionPlan.message);
+    }
+
+    /*
+     * Step 2:
+     * Hanya form yang READY yang boleh
+     * diteruskan ke browser.
+     */
     await this.openForm(form);
 
     let fieldsFilled = 0;
@@ -157,6 +186,20 @@ export class FormExecutor {
     };
   }
 
+  private logExecutionPlan(plan: FormExecutionPlan): void {
+    console.log(`🧭 [FormExecutor] Execution plan: ${plan.decision}`);
+
+    console.log(`🧭 [FormExecutor] Required fields: ${plan.requiredFields}`);
+
+    console.log(`🧭 [FormExecutor] Ready fields: ${plan.readyFields}`);
+
+    console.log(
+      `🧭 [FormExecutor] Missing required fields: ${plan.missingRequiredFields}`,
+    );
+
+    console.log(`🧭 [FormExecutor] ${plan.message}`);
+  }
+
   private async resolveField(
     type: FormFieldType,
     label: string | null,
@@ -176,8 +219,6 @@ export class FormExecutor {
     /*
      * Priority 1:
      * Exact label match.
-     *
-     * Exact match dianggap deterministic.
      */
     if (normalizedLabel) {
       const exactLabel = availableFields.filter(
@@ -198,9 +239,7 @@ export class FormExecutor {
        * Priority 2:
        * Partial label match.
        *
-       * Partial match TIDAK boleh langsung memilih
-       * candidate pertama. Kalau ada lebih dari satu,
-       * harus dianggap ambiguous.
+       * Partial match harus unique.
        */
       const partialLabel = availableFields.filter((field) => {
         const fieldLabel = this.normalizeText(field.label);
@@ -235,9 +274,6 @@ export class FormExecutor {
     /*
      * Priority 3:
      * FieldMappingResolver.
-     *
-     * Resolver menentukan apakah automatic mapping
-     * berdasarkan semantic field type aman digunakan.
      */
     if (this.resolver) {
       const resolution = this.resolver.resolve(
