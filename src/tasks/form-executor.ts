@@ -1,5 +1,10 @@
 import { BrowserExecutor } from "../browser/browser-executor.js";
 import {
+  FormInspector,
+  InspectedCheckbox,
+  InspectedField,
+} from "./form-inspector.js";
+import {
   FormFieldType,
   PlannedForm,
   PlannedFormCheckbox,
@@ -15,7 +20,14 @@ export interface FormExecutionResult {
 }
 
 export class FormExecutor {
-  constructor(private readonly browser: BrowserExecutor) {}
+  private readonly inspector?: FormInspector;
+
+  constructor(
+    private readonly browser: BrowserExecutor,
+    inspector?: FormInspector,
+  ) {
+    this.inspector = inspector;
+  }
 
   async openForm(form: PlannedForm): Promise<string> {
     if (!form.targetUrl.trim()) {
@@ -32,9 +44,17 @@ export class FormExecutor {
   }
 
   async inspectForm(form: PlannedForm): Promise<string> {
-    const pageText = await this.openForm(form);
+    await this.openForm(form);
 
-    return pageText.slice(0, 5000);
+    if (this.inspector) {
+      const inspection = await this.inspector.inspect();
+
+      return inspection.summary;
+    }
+
+    const pageText = await this.browser.getPageResult();
+
+    return pageText.text.slice(0, 5000);
   }
 
   async fillForm(form: PlannedForm): Promise<FormExecutionResult> {
@@ -42,6 +62,20 @@ export class FormExecutor {
 
     let fieldsFilled = 0;
     let checkboxesChecked = 0;
+
+    let inspectedFields: InspectedField[] = [];
+    let inspectedCheckboxes: InspectedCheckbox[] = [];
+
+    if (this.inspector) {
+      const inspection = await this.inspector.inspect();
+
+      inspectedFields = inspection.fields;
+      inspectedCheckboxes = inspection.checkboxes;
+
+      console.log(
+        `🔎 [FormExecutor] Using structured inspection: ${inspectedFields.length} fields, ${inspectedCheckboxes.length} checkboxes.`,
+      );
+    }
 
     for (const field of form.fields) {
       if (field.value === null) {
@@ -54,7 +88,17 @@ export class FormExecutor {
         continue;
       }
 
-      await this.fillField(field.type, field.label, field.value);
+      const inspectedField = this.findMatchingField(
+        field.type,
+        field.label,
+        inspectedFields,
+      );
+
+      if (inspectedField) {
+        await this.fillInspectedField(inspectedField, field.value);
+      } else {
+        await this.fillField(field.type, field.label, field.value);
+      }
 
       fieldsFilled++;
     }
@@ -64,7 +108,20 @@ export class FormExecutor {
         continue;
       }
 
-      await this.checkCheckbox(checkbox);
+      const inspectedCheckbox = this.findMatchingCheckbox(
+        checkbox,
+        inspectedCheckboxes,
+      );
+
+      if (inspectedCheckbox) {
+        await this.browser.click(inspectedCheckbox.selector);
+
+        console.log(
+          `☑️ [FormExecutor] Checked ${checkbox.type} using inspected selector ${inspectedCheckbox.selector}`,
+        );
+      } else {
+        await this.checkCheckbox(checkbox);
+      }
 
       checkboxesChecked++;
     }
@@ -81,6 +138,110 @@ export class FormExecutor {
       submitAttempted: false,
       message: "Form berhasil diisi tetapi belum disubmit.",
     };
+  }
+
+  private findMatchingField(
+    type: FormFieldType,
+    label: string | null,
+    fields: InspectedField[],
+  ): InspectedField | undefined {
+    if (fields.length === 0) {
+      return undefined;
+    }
+
+    const normalizedLabel = this.normalizeText(label);
+
+    if (normalizedLabel) {
+      const exactLabel = fields.find(
+        (field) => this.normalizeText(field.label) === normalizedLabel,
+      );
+
+      if (exactLabel) {
+        return exactLabel;
+      }
+
+      const partialLabel = fields.find((field) => {
+        const fieldLabel = this.normalizeText(field.label);
+
+        return (
+          fieldLabel.includes(normalizedLabel) ||
+          normalizedLabel.includes(fieldLabel)
+        );
+      });
+
+      if (partialLabel) {
+        return partialLabel;
+      }
+    }
+
+    const keywords = this.getFieldKeywords(type);
+
+    const keywordMatch = fields.find((field) =>
+      this.fieldContainsKeyword(field, keywords),
+    );
+
+    if (keywordMatch) {
+      return keywordMatch;
+    }
+
+    return undefined;
+  }
+
+  private findMatchingCheckbox(
+    plannedCheckbox: PlannedFormCheckbox,
+    checkboxes: InspectedCheckbox[],
+  ): InspectedCheckbox | undefined {
+    if (checkboxes.length === 0) {
+      return undefined;
+    }
+
+    const normalizedLabel = this.normalizeText(plannedCheckbox.label);
+
+    if (normalizedLabel) {
+      const exactLabel = checkboxes.find(
+        (checkbox) => this.normalizeText(checkbox.label) === normalizedLabel,
+      );
+
+      if (exactLabel) {
+        return exactLabel;
+      }
+
+      const partialLabel = checkboxes.find((checkbox) => {
+        const checkboxLabel = this.normalizeText(checkbox.label);
+
+        return (
+          checkboxLabel.includes(normalizedLabel) ||
+          normalizedLabel.includes(checkboxLabel)
+        );
+      });
+
+      if (partialLabel) {
+        return partialLabel;
+      }
+    }
+
+    const keywords = this.getCheckboxKeywords(plannedCheckbox.type);
+
+    return checkboxes.find((checkbox) => {
+      const text = [checkbox.label, checkbox.name, checkbox.ariaLabel]
+        .filter(Boolean)
+        .join(" ");
+
+      const normalized = this.normalizeText(text);
+
+      return keywords.some((keyword) => normalized.includes(keyword));
+    });
+  }
+
+  private async fillInspectedField(
+    field: InspectedField,
+    value: string,
+  ): Promise<void> {
+    console.log(
+      `✏️ [FormExecutor] Filling inspected ${field.kind} "${field.label ?? field.name ?? field.id ?? field.index}" using ${field.selector}`,
+    );
+
+    await this.browser.fill(field.selector, value);
   }
 
   private async fillField(
@@ -135,6 +296,110 @@ export class FormExecutor {
     }
 
     throw new Error(`Checkbox "${checkbox.type}" tidak berhasil ditemukan.`);
+  }
+
+  private getFieldKeywords(type: FormFieldType): string[] {
+    switch (type) {
+      case "TWITTER_HANDLE":
+        return [
+          "twitter",
+          "twitter username",
+          "twitter handle",
+          "x username",
+          "x handle",
+          "x account",
+        ];
+
+      case "WALLET_ADDRESS":
+        return [
+          "wallet",
+          "wallet address",
+          "ethereum address",
+          "evm address",
+          "address",
+        ];
+
+      case "OWN_TWEET_URL":
+        return [
+          "tweet",
+          "tweet url",
+          "tweet link",
+          "post",
+          "post url",
+          "post link",
+          "quote",
+        ];
+
+      case "EMAIL":
+        return ["email", "email address", "e-mail"];
+
+      case "DISCORD":
+        return ["discord", "discord username", "discord id"];
+
+      case "TELEGRAM":
+        return ["telegram", "telegram username", "telegram id"];
+
+      case "TEXT":
+        return [];
+
+      case "CUSTOM":
+        return [];
+
+      default:
+        return [];
+    }
+  }
+
+  private fieldContainsKeyword(
+    field: InspectedField,
+    keywords: string[],
+  ): boolean {
+    if (keywords.length === 0) {
+      return false;
+    }
+
+    const searchableText = [
+      field.label,
+      field.name,
+      field.id,
+      field.placeholder,
+      field.ariaLabel,
+      field.type,
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    const normalized = this.normalizeText(searchableText);
+
+    return keywords.some((keyword) =>
+      normalized.includes(this.normalizeText(keyword)),
+    );
+  }
+
+  private getCheckboxKeywords(type: PlannedFormCheckbox["type"]): string[] {
+    switch (type) {
+      case "X_FOLLOW":
+        return ["follow"];
+
+      case "X_LIKE":
+        return ["like"];
+
+      case "X_REPOST":
+        return ["repost", "retweet"];
+
+      case "X_REPLY":
+        return ["reply"];
+
+      case "X_QUOTE":
+        return ["quote"];
+
+      default:
+        return [];
+    }
+  }
+
+  private normalizeText(value: string | null | undefined): string {
+    return value?.trim().toLowerCase().replace(/\s+/g, " ") ?? "";
   }
 
   private buildFieldSelectors(
