@@ -37,7 +37,11 @@ export class ToolRegistry {
     return this.approvalManager;
   }
 
-  async executeTool(name: string, args: Record<string, any>): Promise<string> {
+  async executeTool(
+    name: string,
+    args: Record<string, any>,
+    chatId?: string | number,
+  ): Promise<string> {
     const tool = this.getTool(name);
 
     if (!tool) {
@@ -51,7 +55,20 @@ export class ToolRegistry {
     );
 
     if (policy.decision !== "ALLOW") {
+      if (chatId === undefined) {
+        return JSON.stringify({
+          success: false,
+          blocked: true,
+          requiresApproval: true,
+          tool: name,
+          riskLevel: tool.riskLevel,
+          decision: policy.decision,
+          reason: "Approval membutuhkan chatId Telegram.",
+        });
+      }
+
       const approvalRequest = this.approvalManager.createRequest(
+        Number(chatId),
         name,
         args,
         tool.riskLevel,

@@ -32,13 +32,15 @@ export class Agent {
   }
 
   /**
-   * Memproses pesan pengguna melalui Reasoning Loop dengan memuat & menyimpan riwayat percakapan
+   * Memproses pesan pengguna melalui Reasoning Loop
+   * dengan memuat & menyimpan riwayat percakapan.
    */
   async processMessage(
     userMessage: string,
     chatId?: string | number,
   ): Promise<string> {
     const tools = this.toolRegistry.getAllTools();
+
     let messages: LLMMessage[] = [];
 
     if (this.memoryManager && chatId !== undefined) {
@@ -52,8 +54,11 @@ export class Agent {
 
     while (iteration < this.maxIterations) {
       iteration++;
+
       console.log(
-        `🤖 [Agent Loop] Iterasi ke-${iteration} (chat_id: ${chatId || "local"})...`,
+        `🤖 [Agent Loop] Iterasi ke-${iteration} (chat_id: ${
+          chatId || "local"
+        })...`,
       );
 
       try {
@@ -80,7 +85,9 @@ export class Agent {
             const toolResult = await this.toolRegistry.executeTool(
               call.name,
               call.args,
+              chatId,
             );
+
             console.log(
               `📦 [Agent] Hasil eksekusi "${call.name}":`,
               toolResult,
@@ -116,7 +123,10 @@ export class Agent {
           `❌ [Agent Error] Terjadi kesalahan pada iterasi ke-${iteration}:`,
           error,
         );
-        return `⚠️ Maaf, terjadi kesalahan pada Agent: ${error.message || String(error)}`;
+
+        return `⚠️ Maaf, terjadi kesalahan pada Agent: ${
+          error.message || String(error)
+        }`;
       }
 
       break;

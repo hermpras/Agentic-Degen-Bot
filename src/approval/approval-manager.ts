@@ -5,6 +5,7 @@ export type ApprovalStatus = "PENDING" | "APPROVED" | "REJECTED";
 
 export interface ApprovalRequest {
   id: string;
+  chatId: number;
   toolName: string;
   args: Record<string, any>;
   riskLevel: ToolRiskLevel;
@@ -16,12 +17,14 @@ export class ApprovalManager {
   private requests: Map<string, ApprovalRequest> = new Map();
 
   createRequest(
+    chatId: number,
     toolName: string,
     args: Record<string, any>,
     riskLevel: ToolRiskLevel,
   ): ApprovalRequest {
     const request: ApprovalRequest = {
       id: randomUUID(),
+      chatId,
       toolName,
       args,
       riskLevel,
@@ -31,7 +34,9 @@ export class ApprovalManager {
 
     this.requests.set(request.id, request);
 
-    console.log(`⏳ [ApprovalManager] Approval request dibuat: ${request.id}`);
+    console.log(
+      `⏳ [ApprovalManager] Approval request dibuat: ${request.id} untuk chat ${chatId}`,
+    );
 
     return request;
   }
