@@ -1,18 +1,17 @@
 import { BrowserExecutor } from "./browser-executor.js";
 import { BrowserSessionManager } from "./browser-session-manager.js";
 
-export interface BrowserSessionStartResult {
+export interface BrowserSessionHandle {
   accountId: number;
   sessionPath: string;
   hasExistingSession: boolean;
+  executor: BrowserExecutor;
 }
 
 export class BrowserSessionService {
   constructor(private readonly sessionManager = new BrowserSessionManager()) {}
 
-  async startManualSession(
-    accountId: number,
-  ): Promise<BrowserSessionStartResult> {
+  async startManualSession(accountId: number): Promise<BrowserSessionHandle> {
     const session = this.sessionManager.getSessionInfo(accountId);
 
     console.log(
@@ -44,27 +43,33 @@ export class BrowserSessionService {
       accountId,
       sessionPath: session.sessionPath,
       hasExistingSession: session.exists,
+      executor,
     };
   }
 
-  async saveSession(
-    accountId: number,
-    executor: BrowserExecutor,
-  ): Promise<string> {
-    const sessionPath = this.sessionManager.getSessionPath(accountId);
-
+  async saveSession(session: BrowserSessionHandle): Promise<string> {
     console.log(
-      `🔐 [BrowserSessionService] Saving session for account ${accountId}...`,
+      `🔐 [BrowserSessionService] Saving session for account ${session.accountId}...`,
     );
 
-    await executor.saveStorageState(sessionPath);
+    const sessionPath = await session.executor.saveStorageState(
+      session.sessionPath,
+    );
 
     console.log(`🔐 [BrowserSessionService] Session saved: ${sessionPath}`);
 
     return sessionPath;
   }
 
-  async openSavedSession(accountId: number): Promise<BrowserExecutor> {
+  async closeSession(session: BrowserSessionHandle): Promise<void> {
+    console.log(
+      `🌐 [BrowserSessionService] Closing session for account ${session.accountId}...`,
+    );
+
+    await session.executor.close();
+  }
+
+  async openSavedSession(accountId: number): Promise<BrowserSessionHandle> {
     const session = this.sessionManager.getSessionInfo(accountId);
 
     if (!session.exists) {
@@ -84,7 +89,12 @@ export class BrowserSessionService {
 
     await executor.start();
 
-    return executor;
+    return {
+      accountId,
+      sessionPath: session.sessionPath,
+      hasExistingSession: true,
+      executor,
+    };
   }
 
   hasSession(accountId: number): boolean {
