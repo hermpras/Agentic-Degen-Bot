@@ -1,304 +1,396 @@
-import { AccountBrowser } from "../browser/account-browser.js";
+import { AgentDatabase } from "../database/agent-database.js";
 import { BrowserExecutor } from "../browser/browser-executor.js";
-import { PlannedTask } from "./task-planner.js";
+import { TaskManager, TaskStatus } from "./task-manager.js";
+import { FormExecutor } from "./form-executor.js";
+import { XActionExecutor, type XActionResult } from "./x-action-executor.js";
+import type { PlannedTask } from "./task-planner.js";
 
-export interface XBrowser {
-  open(url: string): Promise<{
-    url: string;
-    title: string;
-    text: string;
-  }>;
-
-  elementExists(selector: string): Promise<boolean>;
-
-  click(selector: string): Promise<void>;
-
-  getText(selector: string): Promise<string>;
-
-  getCurrentUrl(): string;
-}
-
-export interface XBrowserProvider {
-  openForAccount(accountId: number): Promise<XBrowser>;
-
-  close(): Promise<void>;
-}
-
-export type XActionType =
-  | "X_FOLLOW"
-  | "X_LIKE"
-  | "X_REPOST"
-  | "X_COMMENT"
-  | "X_REPLY"
-  | "X_QUOTE"
-  | "X_POST";
-
-export type XFollowState = "FOLLOW" | "FOLLOWING" | "UNKNOWN";
-
-export interface XFollowInspectionResult {
-  accountId: number;
+export interface TaskExecutionResult {
+  planTaskId: string;
+  taskId: number | null;
+  projectName: string;
   accountName: string;
-  targetUrl: string;
-  state: XFollowState;
-  matchedSelector: string | null;
-  message: string;
-}
-
-export interface XActionResult {
-  accountId: number;
-  action: XActionType;
-  targetUrl: string;
-  success: boolean;
+  taskType: string;
+  status: TaskStatus;
   output: string | null;
+  error: string | null;
 }
 
-export class XActionExecutor {
+export interface TaskExecutionReport {
+  totalTasks: number;
+  completedTasks: number;
+  failedTasks: number;
+  skippedTasks: number;
+  results: TaskExecutionResult[];
+}
+
+export class TaskExecutor {
+  private readonly taskManager: TaskManager;
+  private readonly xActionExecutor: XActionExecutor;
+
   constructor(
-    private readonly browserProvider: XBrowserProvider = new AccountBrowserAdapter(),
-  ) {}
-
-  async inspectFollow(task: PlannedTask): Promise<XFollowInspectionResult> {
-    if (!task.targetUrl) {
-      throw new Error(`Task ${task.planTaskId} membutuhkan targetUrl.`);
-    }
-
-    console.log("");
-    console.log(
-      `𝕏 [XActionExecutor] Inspect X_FOLLOW → Account ${task.accountId}`,
-    );
-
-    try {
-      const browser = await this.browserProvider.openForAccount(task.accountId);
-
-      await browser.open(task.targetUrl);
-
-      return await this.inspectFollowOnBrowser(browser, task);
-    } finally {
-      await this.browserProvider.close();
-    }
+    private readonly database: AgentDatabase,
+    xActionExecutor?: XActionExecutor,
+  ) {
+    this.taskManager = new TaskManager(database);
+    this.xActionExecutor = xActionExecutor ?? new XActionExecutor();
   }
 
-  async execute(task: PlannedTask): Promise<XActionResult> {
-    if (!this.isXAction(task.taskType)) {
-      throw new Error(`Task type "${task.taskType}" bukan X action.`);
+  async executePlan(tasks: PlannedTask[]): Promise<TaskExecutionReport> {
+    const report: TaskExecutionReport = {
+      totalTasks: tasks.length,
+      completedTasks: 0,
+      failedTasks: 0,
+      skippedTasks: 0,
+      results: [],
+    };
+
+    const completedPlanTaskIds = new Set<string>();
+
+    for (const task of tasks) {
+      const result = await this.executeTask(task, completedPlanTaskIds);
+
+      report.results.push(result);
+
+      if (result.status === "DONE") {
+        report.completedTasks += 1;
+        completedPlanTaskIds.add(task.planTaskId);
+      } else if (result.status === "FAILED") {
+        report.failedTasks += 1;
+      } else {
+        report.skippedTasks += 1;
+      }
     }
 
-    if (!task.targetUrl) {
-      throw new Error(`Task ${task.planTaskId} membutuhkan targetUrl.`);
-    }
-
-    if (task.taskType === "X_FOLLOW") {
-      return this.executeFollowWithInspection(task);
-    }
-
-    throw new Error(`X action "${task.taskType}" belum memiliki executor.`);
+    return report;
   }
 
-  private async executeFollowWithInspection(
+  async executeTask(
     task: PlannedTask,
-  ): Promise<XActionResult> {
+    completedPlanTaskIds = new Set<string>(),
+  ): Promise<TaskExecutionResult> {
     console.log("");
+
     console.log(
-      `𝕏 [XActionExecutor] Preparing X_FOLLOW → Account ${task.accountId}`,
+      `⚙️ [TaskExecutor] Executing ${task.taskType} → ${task.projectName} / ${task.accountName}`,
     );
 
+    const dependencyResult = this.checkDependencies(task, completedPlanTaskIds);
+
+    if (!dependencyResult.ok) {
+      console.log(`⏭️ [TaskExecutor] Task skipped: ${dependencyResult.reason}`);
+
+      return {
+        planTaskId: task.planTaskId,
+        taskId: null,
+        projectName: task.projectName,
+        accountName: task.accountName,
+        taskType: task.taskType,
+        status: "PENDING",
+        output: null,
+        error: dependencyResult.reason ?? "Dependency belum selesai.",
+      };
+    }
+
+    let databaseTaskId: number | null = null;
+
     try {
-      const browser = await this.browserProvider.openForAccount(task.accountId);
+      databaseTaskId = this.createDatabaseTask(task);
 
-      await browser.open(task.targetUrl!);
+      this.taskManager.markTaskInProgress(databaseTaskId);
 
-      const inspection = await this.inspectFollowOnBrowser(browser, task);
+      const actionResult = await this.executeTaskAction(task);
 
-      if (inspection.state === "FOLLOWING") {
-        console.log(
-          "✅ [XActionExecutor] Target sudah di-follow. Tidak melakukan click.",
-        );
-
-        return {
-          accountId: task.accountId,
-
-          action: "X_FOLLOW",
-
-          targetUrl: task.targetUrl!,
-
-          success: true,
-
-          output: JSON.stringify({
-            action: "X_FOLLOW",
-
-            targetUrl: task.targetUrl,
-
-            accountId: task.accountId,
-
-            accountName: task.accountName,
-
-            state: "FOLLOWING",
-
-            alreadyFollowing: true,
-
-            actionPerformed: false,
-
-            matchedSelector: inspection.matchedSelector,
-          }),
-        };
-      }
-
-      if (inspection.state === "UNKNOWN") {
-        throw new Error(
-          `Follow state tidak dapat ditentukan pada ${task.targetUrl}. Action dibatalkan.`,
-        );
-      }
-
-      const selector = inspection.matchedSelector;
-
-      if (!selector) {
-        throw new Error(
-          "Follow button terdeteksi tetapi selector tidak tersedia.",
-        );
-      }
-
-      await browser.click(selector);
-
-      console.log(
-        `𝕏 [XActionExecutor] Follow berhasil menggunakan selector: ${selector}`,
+      this.taskManager.markTaskDone(
+        databaseTaskId,
+        actionResult.output ?? undefined,
       );
 
+      console.log(`✅ [TaskExecutor] Task DONE: ${task.planTaskId}`);
+
       return {
-        accountId: task.accountId,
-
-        action: "X_FOLLOW",
-
-        targetUrl: task.targetUrl!,
-
-        success: true,
-
-        output: JSON.stringify({
-          action: "X_FOLLOW",
-
-          targetUrl: task.targetUrl,
-
-          accountId: task.accountId,
-
-          accountName: task.accountName,
-
-          state: "FOLLOW",
-
-          actionPerformed: true,
-
-          matchedSelector: selector,
-
-          currentUrl: browser.getCurrentUrl(),
-        }),
+        planTaskId: task.planTaskId,
+        taskId: databaseTaskId,
+        projectName: task.projectName,
+        accountName: task.accountName,
+        taskType: task.taskType,
+        status: "DONE",
+        output: actionResult.output,
+        error: null,
       };
-    } finally {
-      await this.browserProvider.close();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      console.error(`❌ [TaskExecutor] Task FAILED: ${task.planTaskId}`);
+      console.error(message);
+
+      if (databaseTaskId !== null) {
+        this.taskManager.markTaskFailed(databaseTaskId, message);
+      }
+
+      return {
+        planTaskId: task.planTaskId,
+        taskId: databaseTaskId,
+        projectName: task.projectName,
+        accountName: task.accountName,
+        taskType: task.taskType,
+        status: "FAILED",
+        output: null,
+        error: message,
+      };
     }
   }
 
-  private async inspectFollowOnBrowser(
-    browser: XBrowser,
-    task: PlannedTask,
-  ): Promise<XFollowInspectionResult> {
-    const followSelectors = [
-      'button[data-testid="followButton"]',
-      'button:text-is("Follow")',
-    ];
-
-    for (const selector of followSelectors) {
-      const exists = await browser.elementExists(selector);
-
-      if (exists) {
-        console.log(`𝕏 [XActionExecutor] Follow button ditemukan: ${selector}`);
-
-        return {
-          accountId: task.accountId,
-
-          accountName: task.accountName,
-
-          targetUrl: task.targetUrl!,
-
-          state: "FOLLOW",
-
-          matchedSelector: selector,
-
-          message: "Target belum di-follow.",
-        };
-      }
+  private async executeTaskAction(task: PlannedTask): Promise<{
+    output: string | null;
+  }> {
+    if (this.isXAction(task.taskType)) {
+      return this.executeXAction(task);
     }
 
-    const followingSelectors = [
-      'button[data-testid="unfollowButton"]',
-      'button:text-is("Following")',
-    ];
+    switch (task.taskType) {
+      case "OPEN_PAGE":
+        return this.executeOpenPage(task);
 
-    for (const selector of followingSelectors) {
-      const exists = await browser.elementExists(selector);
+      case "FORM":
+      case "FORM_TWITTER":
+      case "FORM_WALLET":
+      case "FORM_SUBMIT":
+        return this.executeFormTask(task);
 
-      if (exists) {
-        console.log(
-          `𝕏 [XActionExecutor] Following state ditemukan: ${selector}`,
+      case "WHITELIST":
+        return this.executeWhitelistTask(task);
+
+      case "CUSTOM":
+        return this.executeCustomTask(task);
+
+      default:
+        throw new Error(
+          `Task type "${task.taskType}" belum memiliki executor.`,
         );
-
-        return {
-          accountId: task.accountId,
-
-          accountName: task.accountName,
-
-          targetUrl: task.targetUrl!,
-
-          state: "FOLLOWING",
-
-          matchedSelector: selector,
-
-          message: "Account sudah mengikuti target.",
-        };
-      }
     }
+  }
 
-    let pageText = "";
+  private async executeXAction(task: PlannedTask): Promise<{
+    output: string | null;
+  }> {
+    console.log(`𝕏 [TaskExecutor] Routing ${task.taskType} → XActionExecutor`);
 
-    try {
-      pageText = await browser.getText("body");
-    } catch {
-      // Ignore body read failure.
+    const result: XActionResult = await this.xActionExecutor.execute(task);
+
+    if (!result.success) {
+      throw new Error(result.output ?? `X action ${task.taskType} gagal.`);
     }
-
-    if (pageText.toLowerCase().includes("following")) {
-      console.log("𝕏 [XActionExecutor] Following terdeteksi dari page text.");
-
-      return {
-        accountId: task.accountId,
-
-        accountName: task.accountName,
-
-        targetUrl: task.targetUrl!,
-
-        state: "FOLLOWING",
-
-        matchedSelector: null,
-
-        message: "Account sudah mengikuti target berdasarkan page text.",
-      };
-    }
-
-    console.log("⚠️ [XActionExecutor] Follow state tidak dapat ditentukan.");
 
     return {
-      accountId: task.accountId,
-
-      accountName: task.accountName,
-
-      targetUrl: task.targetUrl!,
-
-      state: "UNKNOWN",
-
-      matchedSelector: null,
-
-      message: "Follow state tidak dapat ditentukan.",
+      output: result.output,
     };
   }
 
-  private isXAction(taskType: string): taskType is XActionType {
+  private async executeOpenPage(task: PlannedTask): Promise<{
+    output: string | null;
+  }> {
+    if (!task.targetUrl) {
+      throw new Error(`Task ${task.planTaskId} membutuhkan targetUrl.`);
+    }
+
+    console.log(`🌐 [TaskExecutor] OPEN_PAGE → ${task.targetUrl}`);
+
+    const browser = new BrowserExecutor({
+      headless: true,
+    });
+
+    try {
+      const result = await browser.open(task.targetUrl);
+
+      return {
+        output: JSON.stringify(
+          {
+            url: result.url,
+            title: result.title,
+            text: result.text.slice(0, 4000),
+          },
+          null,
+          2,
+        ),
+      };
+    } finally {
+      await browser.close();
+    }
+  }
+
+  private async executeFormTask(task: PlannedTask): Promise<{
+    output: string | null;
+  }> {
+    if (!task.form) {
+      throw new Error(
+        `Task ${task.planTaskId} adalah form task tetapi konfigurasi form tidak tersedia.`,
+      );
+    }
+
+    if (!task.form.targetUrl) {
+      throw new Error(`Task ${task.planTaskId} membutuhkan target URL form.`);
+    }
+
+    console.log(`📝 [TaskExecutor] Form task → ${task.form.targetUrl}`);
+
+    const browser = new BrowserExecutor({
+      headless: true,
+    });
+
+    try {
+      const formExecutor = new FormExecutor(browser);
+
+      const inspection = await formExecutor.inspectForm(task.form);
+
+      console.log(
+        `🔎 [TaskExecutor] Form inspected (${inspection.length} chars).`,
+      );
+
+      const formResult = await formExecutor.fillForm(task.form);
+
+      return {
+        output: JSON.stringify(
+          {
+            action: "FORM",
+            formType: task.form.formType,
+            targetUrl: task.form.targetUrl,
+            fieldsConfigured: task.form.fields.length,
+            checkboxesConfigured: task.form.checkboxes.length,
+            fieldsFilled: formResult.fieldsFilled,
+            checkboxesChecked: formResult.checkboxesChecked,
+            submitAttempted: formResult.submitAttempted,
+            message: formResult.message,
+          },
+          null,
+          2,
+        ),
+      };
+    } finally {
+      await browser.close();
+    }
+  }
+
+  private async executeWhitelistTask(task: PlannedTask): Promise<{
+    output: string | null;
+  }> {
+    console.log(`📝 [TaskExecutor] WHITELIST task: ${task.description}`);
+
+    if (task.form) {
+      return this.executeFormTask(task);
+    }
+
+    if (task.targetUrl) {
+      return this.executeOpenPage(task);
+    }
+
+    return {
+      output: JSON.stringify(
+        {
+          action: "WHITELIST",
+          description: task.description,
+          targetUrl: null,
+          message:
+            "Whitelist task belum memiliki form atau target URL untuk dieksekusi.",
+        },
+        null,
+        2,
+      ),
+    };
+  }
+
+  private async executeCustomTask(task: PlannedTask): Promise<{
+    output: string | null;
+  }> {
+    console.log(`🔧 [TaskExecutor] CUSTOM task: ${task.description}`);
+
+    return {
+      output: JSON.stringify(
+        {
+          action: "CUSTOM",
+          description: task.description,
+          targetUrl: task.targetUrl ?? null,
+        },
+        null,
+        2,
+      ),
+    };
+  }
+
+  private createDatabaseTask(task: PlannedTask): number {
+    const projectStmt = this.database.getDb().prepare(`
+        SELECT id
+        FROM projects
+        WHERE name = ?
+        ORDER BY id ASC
+        LIMIT 1
+      `);
+
+    const project = projectStmt.get(task.projectName) as
+      | {
+          id: number;
+        }
+      | undefined;
+
+    if (!project) {
+      throw new Error(
+        `Project "${task.projectName}" tidak ditemukan di database.`,
+      );
+    }
+
+    const stmt = this.database.getDb().prepare(`
+        INSERT INTO tasks (
+          project_id,
+          account_id,
+          task_type,
+          target_url,
+          description,
+          status
+        )
+        VALUES (?, ?, ?, ?, ?, 'PENDING')
+      `);
+
+    const result = stmt.run(
+      project.id,
+      task.accountId,
+      task.taskType,
+      task.targetUrl ?? task.form?.targetUrl ?? null,
+      task.description,
+    );
+
+    return Number(result.lastInsertRowid);
+  }
+
+  private checkDependencies(
+    task: PlannedTask,
+    completedPlanTaskIds: Set<string>,
+  ): {
+    ok: boolean;
+    reason?: string;
+  } {
+    if (!task.dependsOn || task.dependsOn.length === 0) {
+      return {
+        ok: true,
+      };
+    }
+
+    const missing = task.dependsOn.filter(
+      (dependency) => !completedPlanTaskIds.has(dependency),
+    );
+
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        reason: `Dependency belum selesai: ${missing.join(", ")}`,
+      };
+    }
+
+    return {
+      ok: true,
+    };
+  }
+
+  private isXAction(taskType: string): boolean {
     return [
       "X_FOLLOW",
       "X_LIKE",
@@ -308,25 +400,5 @@ export class XActionExecutor {
       "X_QUOTE",
       "X_POST",
     ].includes(taskType);
-  }
-}
-
-class AccountBrowserAdapter implements XBrowserProvider {
-  private readonly accountBrowser = new AccountBrowser(undefined, {
-    headless: true,
-  });
-
-  private browser: BrowserExecutor | null = null;
-
-  async openForAccount(accountId: number): Promise<XBrowser> {
-    this.browser = await this.accountBrowser.openForAccount(accountId);
-
-    return this.browser;
-  }
-
-  async close(): Promise<void> {
-    await this.accountBrowser.close();
-
-    this.browser = null;
   }
 }
