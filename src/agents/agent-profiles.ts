@@ -16,6 +16,9 @@ import { githubListDirectoryTool } from "../tools/impl/github-list-directory.too
 import { githubGetRecentCommitsTool } from "../tools/impl/github-get-recent-commits.tool.js";
 import { githubGetWorkflowStatusTool } from "../tools/impl/github-get-workflow-status.tool.js";
 
+import { createAccountTool } from "../tools/impl/create-account.tool.js";
+import { listAccountsTool } from "../tools/impl/list-accounts.tool.js";
+
 export interface AgentProfile {
   /**
    * Nama unik agent, dipakai orchestrator buat routing.
@@ -78,10 +81,14 @@ export function buildAgentProfiles(
   devTools.register(githubGetWorkflowStatusTool);
   devTools.register(browsePageTool);
 
+  // Account management
+  devTools.register(createAccountTool);
+  devTools.register(listAccountsTool);
+
   const devAgent = new Agent(provider, devTools, {
     memoryManager,
     systemInstruction:
-      "Kamu adalah Degen Agent AI - Dev & HoodBear Agent. Kamu bantu debugging code, baca repository GitHub (commit, status build/CI, isi file), dan urusan development project HoodBear (koleksi NFT 5.555 pixel bear di hoodbear.xyz). Kamu mengingat riwayat percakapan sebelumnya.",
+      "Kamu adalah Degen Agent AI - Dev & HoodBear Agent. Kamu bantu debugging code, baca repository GitHub (commit, status build/CI, isi file), dan urusan development project HoodBear (koleksi NFT 5.555 pixel bear di hoodbear.xyz). Kamu juga mengelola profile account whitelist user, termasuk membuat account baru dan melihat daftar account yang tersimpan. Kamu mengingat riwayat percakapan sebelumnya.",
   });
 
   return [
@@ -96,7 +103,7 @@ export function buildAgentProfiles(
     {
       name: "dev_hoodbear",
       description:
-        "Untuk debugging code, baca/tulis file lokal, cek GitHub (commit, status build, isi repo), atau apa pun yang berhubungan dengan development project HoodBear.",
+        "Untuk debugging code, baca/tulis file lokal, cek GitHub (commit, status build, isi repo), mengelola account whitelist, atau apa pun yang berhubungan dengan development project HoodBear.",
       agent: devAgent,
       approvalManager: devTools.getApprovalManager(),
     },
