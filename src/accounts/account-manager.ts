@@ -180,6 +180,59 @@ export class AccountManager {
     return this.getAccountById(id);
   }
 
+  renameAccount(currentName: string, newName: string): Account | undefined {
+    const oldName = currentName.trim();
+    const normalizedNewName = newName.trim();
+
+    if (!oldName) {
+      throw new Error("Nama account lama tidak boleh kosong.");
+    }
+
+    if (!normalizedNewName) {
+      throw new Error("Nama account baru tidak boleh kosong.");
+    }
+
+    const existing = this.getAccountByName(oldName);
+
+    if (!existing) {
+      return undefined;
+    }
+
+    if (oldName === normalizedNewName) {
+      return existing;
+    }
+
+    const nameAlreadyUsed = this.getAccountByName(normalizedNewName);
+
+    if (nameAlreadyUsed) {
+      throw new Error(`Account dengan nama "${normalizedNewName}" sudah ada.`);
+    }
+
+    const stmt = this.database.getDb().prepare(`
+      UPDATE accounts
+      SET
+        name = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `);
+
+    stmt.run(normalizedNewName, existing.id);
+
+    const renamed = this.getAccountById(existing.id);
+
+    if (!renamed) {
+      throw new Error(
+        "Account berhasil di-rename tetapi gagal dibaca kembali.",
+      );
+    }
+
+    console.log(
+      `✏️ [AccountManager] Account di-rename: "${oldName}" → "${renamed.name}" (ID: ${renamed.id})`,
+    );
+
+    return renamed;
+  }
+
   deactivateAccount(id: number): Account | undefined {
     return this.updateAccount(id, {
       status: "INACTIVE",

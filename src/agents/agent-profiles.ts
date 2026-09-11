@@ -19,6 +19,7 @@ import { githubGetWorkflowStatusTool } from "../tools/impl/github-get-workflow-s
 import { createAccountTool } from "../tools/impl/create-account.tool.js";
 import { listAccountsTool } from "../tools/impl/list-accounts.tool.js";
 import { updateAccountTool } from "../tools/impl/update-account.tool.js";
+import { renameAccountTool } from "../tools/impl/rename-account.tool.js";
 
 export interface AgentProfile {
   /**
@@ -53,8 +54,7 @@ export function buildAgentProfiles(
   memoryManager: MemoryManager,
   database: AgentDatabase,
 ): AgentProfile[] {
-  // Database akan digunakan oleh specialized tools,
-  // misalnya AccountManager dan ProjectManager.
+  // Database digunakan oleh specialized tools.
   void database;
 
   // === General Agent — fallback default, buat research/degen/general chat ===
@@ -70,27 +70,30 @@ export function buildAgentProfiles(
       "Kamu adalah Degen Agent AI - General/Research Agent. Kamu bantu riset Web3, cari info terkini, dan ngobrol santai soal degen/meme/NFT. Kamu mengingat riwayat percakapan sebelumnya. Gunakan tool yang tersedia kalau butuh info real-time.",
   });
 
-  // === Dev & HoodBear Agent — debugging code, baca repo, urusan project HoodBear ===
+  // === Dev & HoodBear Agent — debugging code, baca repo, account management ===
   const devTools = new ToolRegistry();
 
   devTools.register(getCurrentTimeTool);
   devTools.register(readFileTool);
   devTools.register(writeFileTool);
+
   devTools.register(githubReadFileTool);
   devTools.register(githubListDirectoryTool);
   devTools.register(githubGetRecentCommitsTool);
   devTools.register(githubGetWorkflowStatusTool);
+
   devTools.register(browsePageTool);
 
-  // Account management
+  // === Account management ===
   devTools.register(createAccountTool);
   devTools.register(listAccountsTool);
   devTools.register(updateAccountTool);
+  devTools.register(renameAccountTool);
 
   const devAgent = new Agent(provider, devTools, {
     memoryManager,
     systemInstruction:
-      "Kamu adalah Degen Agent AI - Dev & HoodBear Agent. Kamu bantu debugging code, baca repository GitHub (commit, status build/CI, isi file), dan urusan development project HoodBear (koleksi NFT 5.555 pixel bear di hoodbear.xyz). Kamu juga mengelola profile account whitelist user, termasuk membuat account baru, melihat daftar account, dan memperbarui data account seperti Twitter/X, wallet address, atau status ACTIVE/INACTIVE. Kamu mengingat riwayat percakapan sebelumnya.",
+      "Kamu adalah Degen Agent AI - Dev & HoodBear Agent. Kamu bantu debugging code, baca repository GitHub, development project HoodBear, dan mengelola account whitelist user. Account whitelist memiliki nama unik, Twitter/X, wallet address, dan status ACTIVE/INACTIVE. Kamu bisa membuat account baru, melihat daftar account, memperbarui data account, dan mengganti nama account yang sudah ada. Jika user meminta mengubah data account yang sudah ada, gunakan update_account. Jika user meminta mengganti nama account, gunakan rename_account. Jangan membuat account baru jika user hanya meminta mengubah atau me-rename account yang sudah ada. Kamu mengingat riwayat percakapan sebelumnya.",
   });
 
   return [
