@@ -21,30 +21,34 @@ import { listAccountsTool } from "../tools/impl/list-accounts.tool.js";
 import { updateAccountTool } from "../tools/impl/update-account.tool.js";
 import { renameAccountTool } from "../tools/impl/rename-account.tool.js";
 
+import { createProjectTool } from "../tools/impl/create-project.tool.js";
+
 export interface AgentProfile {
   /**
-   * Nama unik agent, dipakai orchestrator buat routing.
+   * Nama unik agent, dipakai orchestrator buat routing
    */
   name: string;
 
   /**
-   * Deskripsi buat orchestrator milih agent mana yang cocok untuk sebuah pesan.
+   * Deskripsi buat orchestrator milih agent mana yang cocok
+   * untuk sebuah pesan
    */
   description: string;
 
   /**
-   * Instance agent.
+   * Instance agent
    */
   agent: Agent;
 
   /**
-   * Approval manager yang dipakai oleh ToolRegistry agent ini.
+   * Approval manager yang dipakai oleh ToolRegistry agent ini
    */
   approvalManager: ApprovalManager;
 }
 
 /**
- * Bikin semua Agent instance yang tersedia, masing-masing dengan tool & system prompt sendiri.
+ * Bikin semua Agent instance yang tersedia, masing-masing
+ * dengan tool & system prompt sendiri.
  *
  * Tambah agent baru di sini kalau mau nambah specialized agent lain
  * (Research, Web3, dst).
@@ -54,10 +58,10 @@ export function buildAgentProfiles(
   memoryManager: MemoryManager,
   database: AgentDatabase,
 ): AgentProfile[] {
-  // Database digunakan oleh specialized tools.
-  void database;
+  // ============================================================
+  // General Agent
+  // ============================================================
 
-  // === General Agent — fallback default, buat research/degen/general chat ===
   const generalTools = new ToolRegistry();
 
   generalTools.register(getCurrentTimeTool);
@@ -66,11 +70,18 @@ export function buildAgentProfiles(
 
   const generalAgent = new Agent(provider, generalTools, {
     memoryManager,
+
     systemInstruction:
-      "Kamu adalah Degen Agent AI - General/Research Agent. Kamu bantu riset Web3, cari info terkini, dan ngobrol santai soal degen/meme/NFT. Kamu mengingat riwayat percakapan sebelumnya. Gunakan tool yang tersedia kalau butuh info real-time.",
+      "Kamu adalah Degen Agent AI - General/Research Agent. " +
+      "Kamu bantu riset Web3, cari info terkini, dan ngobrol santai " +
+      "soal degen/meme/NFT. Kamu mengingat riwayat percakapan sebelumnya. " +
+      "Gunakan tool yang tersedia kalau butuh info real-time.",
   });
 
-  // === Dev & HoodBear Agent — debugging code, baca repo, account management ===
+  // ============================================================
+  // Dev & HoodBear Agent
+  // ============================================================
+
   const devTools = new ToolRegistry();
 
   devTools.register(getCurrentTimeTool);
@@ -84,32 +95,50 @@ export function buildAgentProfiles(
 
   devTools.register(browsePageTool);
 
-  // === Account management ===
+  // Account tools
   devTools.register(createAccountTool);
   devTools.register(listAccountsTool);
   devTools.register(updateAccountTool);
   devTools.register(renameAccountTool);
 
+  // Project tools
+  devTools.register(createProjectTool);
+
   const devAgent = new Agent(provider, devTools, {
     memoryManager,
+
     systemInstruction:
-      "Kamu adalah Degen Agent AI - Dev & HoodBear Agent. Kamu bantu debugging code, baca repository GitHub, development project HoodBear, dan mengelola account whitelist user. Account whitelist memiliki nama unik, Twitter/X, wallet address, dan status ACTIVE/INACTIVE. Kamu bisa membuat account baru, melihat daftar account, memperbarui data account, dan mengganti nama account yang sudah ada. Jika user meminta mengubah data account yang sudah ada, gunakan update_account. Jika user meminta mengganti nama account, gunakan rename_account. Jangan membuat account baru jika user hanya meminta mengubah atau me-rename account yang sudah ada. Kamu mengingat riwayat percakapan sebelumnya.",
+      "Kamu adalah Degen Agent AI - Dev & HoodBear Agent. " +
+      "Kamu bantu debugging code, baca repository GitHub, " +
+      "development project HoodBear, mengelola account whitelist, " +
+      "dan mengelola project whitelist/watchlist. " +
+      "Untuk account, kamu bisa membuat, melihat, memperbarui, " +
+      "dan rename account. Untuk project, kamu bisa mendaftarkan " +
+      "project baru ke database. Kamu mengingat riwayat percakapan sebelumnya.",
   });
 
   return [
     {
       name: "general",
+
       description:
-        "Untuk riset Web3 umum, cari info/berita terkini, ngobrol santai, atau pertanyaan yang tidak spesifik soal development/HoodBear.",
+        "Untuk riset Web3 umum, cari info/berita terkini, ngobrol santai, " +
+        "atau pertanyaan yang tidak spesifik soal development/HoodBear.",
+
       agent: generalAgent,
+
       approvalManager: generalTools.getApprovalManager(),
     },
 
     {
       name: "dev_hoodbear",
+
       description:
-        "Untuk debugging code, baca/tulis file lokal, cek GitHub (commit, status build, isi repo), mengelola account whitelist, atau apa pun yang berhubungan dengan development project HoodBear.",
+        "Untuk debugging code, baca/tulis file lokal, cek GitHub, " +
+        "mengelola account whitelist, atau mengelola project dan watchlist.",
+
       agent: devAgent,
+
       approvalManager: devTools.getApprovalManager(),
     },
   ];
