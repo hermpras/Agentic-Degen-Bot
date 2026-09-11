@@ -1,5 +1,28 @@
 import { AccountBrowser } from "../browser/account-browser.js";
+import { BrowserExecutor } from "../browser/browser-executor.js";
 import { PlannedTask } from "./task-planner.js";
+
+export interface XBrowser {
+  open(url: string): Promise<{
+    url: string;
+    title: string;
+    text: string;
+  }>;
+
+  elementExists(selector: string): Promise<boolean>;
+
+  click(selector: string): Promise<void>;
+
+  getText(selector: string): Promise<string>;
+
+  getCurrentUrl(): string;
+}
+
+export interface XBrowserProvider {
+  openForAccount(accountId: number): Promise<XBrowser>;
+
+  close(): Promise<void>;
+}
 
 export type XActionType =
   | "X_FOLLOW"
@@ -30,6 +53,10 @@ export interface XActionResult {
 }
 
 export class XActionExecutor {
+  constructor(
+    private readonly browserProvider: XBrowserProvider = new AccountBrowserAdapter(),
+  ) {}
+
   async inspectFollow(task: PlannedTask): Promise<XFollowInspectionResult> {
     if (!task.targetUrl) {
       throw new Error(`Task ${task.planTaskId} membutuhkan targetUrl.`);
@@ -40,122 +67,14 @@ export class XActionExecutor {
       `𝕏 [XActionExecutor] Inspect X_FOLLOW → Account ${task.accountId}`,
     );
 
-    const accountBrowser = new AccountBrowser(undefined, {
-      headless: true,
-    });
-
     try {
-      const browser = await accountBrowser.openForAccount(task.accountId);
+      const browser = await this.browserProvider.openForAccount(task.accountId);
 
       await browser.open(task.targetUrl);
 
-      const followSelectors = [
-        'button[data-testid="followButton"]',
-        'button:text-is("Follow")',
-      ];
-
-      for (const selector of followSelectors) {
-        try {
-          await browser.getText(selector);
-
-          console.log(
-            `𝕏 [XActionExecutor] Follow button ditemukan: ${selector}`,
-          );
-
-          return {
-            accountId: task.accountId,
-
-            accountName: task.accountName,
-
-            targetUrl: task.targetUrl,
-
-            state: "FOLLOW",
-
-            matchedSelector: selector,
-
-            message: "Target belum di-follow dan tombol Follow ditemukan.",
-          };
-        } catch {
-          // Coba selector berikutnya.
-        }
-      }
-
-      const followingSelectors = [
-        'button[data-testid="unfollowButton"]',
-        'button:text-is("Following")',
-      ];
-
-      for (const selector of followingSelectors) {
-        try {
-          await browser.getText(selector);
-
-          console.log(
-            `𝕏 [XActionExecutor] Following state ditemukan: ${selector}`,
-          );
-
-          return {
-            accountId: task.accountId,
-
-            accountName: task.accountName,
-
-            targetUrl: task.targetUrl,
-
-            state: "FOLLOWING",
-
-            matchedSelector: selector,
-
-            message: "Account sudah mengikuti target.",
-          };
-        } catch {
-          // Coba selector berikutnya.
-        }
-      }
-
-      let pageText = "";
-
-      try {
-        pageText = await browser.getText("body");
-      } catch {
-        // Ignore body read failure.
-      }
-
-      const normalizedText = pageText.toLowerCase();
-
-      if (normalizedText.includes("following")) {
-        console.log("𝕏 [XActionExecutor] Following terdeteksi dari page text.");
-
-        return {
-          accountId: task.accountId,
-
-          accountName: task.accountName,
-
-          targetUrl: task.targetUrl,
-
-          state: "FOLLOWING",
-
-          matchedSelector: null,
-
-          message: "Account sudah mengikuti target berdasarkan page text.",
-        };
-      }
-
-      console.log("⚠️ [XActionExecutor] Follow state tidak dapat ditentukan.");
-
-      return {
-        accountId: task.accountId,
-
-        accountName: task.accountName,
-
-        targetUrl: task.targetUrl,
-
-        state: "UNKNOWN",
-
-        matchedSelector: null,
-
-        message: "Follow state tidak dapat ditentukan dari halaman.",
-      };
+      return await this.inspectFollowOnBrowser(browser, task);
     } finally {
-      await accountBrowser.close();
+      await this.browserProvider.close();
     }
   }
 
@@ -183,12 +102,8 @@ export class XActionExecutor {
       `𝕏 [XActionExecutor] Preparing X_FOLLOW → Account ${task.accountId}`,
     );
 
-    const accountBrowser = new AccountBrowser(undefined, {
-      headless: true,
-    });
-
     try {
-      const browser = await accountBrowser.openForAccount(task.accountId);
+      const browser = await this.browserProvider.openForAccount(task.accountId);
 
       await browser.open(task.targetUrl!);
 
@@ -270,20 +185,20 @@ export class XActionExecutor {
 
           actionPerformed: true,
 
+          alreadyFollowing: false,
+
           matchedSelector: selector,
 
           currentUrl: browser.getCurrentUrl(),
         }),
       };
     } finally {
-      await accountBrowser.close();
+      await this.browserProvider.close();
     }
   }
 
   private async inspectFollowOnBrowser(
-    browser: {
-      getText(selector: string): Promise<string>;
-    },
+    browser: XBrowser,
     task: PlannedTask,
   ): Promise<XFollowInspectionResult> {
     const followSelectors = [
@@ -292,8 +207,10 @@ export class XActionExecutor {
     ];
 
     for (const selector of followSelectors) {
-      try {
-        await browser.getText(selector);
+      const exists = await browser.elementExists(selector);
+
+      if (exists) {
+        console.log(`𝕏 [XActionExecutor] Follow button ditemukan: ${selector}`);
 
         return {
           accountId: task.accountId,
@@ -308,8 +225,6 @@ export class XActionExecutor {
 
           message: "Target belum di-follow.",
         };
-      } catch {
-        // Coba selector berikutnya.
       }
     }
 
@@ -319,8 +234,12 @@ export class XActionExecutor {
     ];
 
     for (const selector of followingSelectors) {
-      try {
-        await browser.getText(selector);
+      const exists = await browser.elementExists(selector);
+
+      if (exists) {
+        console.log(
+          `𝕏 [XActionExecutor] Following state ditemukan: ${selector}`,
+        );
 
         return {
           accountId: task.accountId,
@@ -335,10 +254,36 @@ export class XActionExecutor {
 
           message: "Account sudah mengikuti target.",
         };
-      } catch {
-        // Coba selector berikutnya.
       }
     }
+
+    let pageText = "";
+
+    try {
+      pageText = await browser.getText("body");
+    } catch {
+      // Ignore body read failure.
+    }
+
+    if (pageText.toLowerCase().includes("following")) {
+      console.log("𝕏 [XActionExecutor] Following terdeteksi dari page text.");
+
+      return {
+        accountId: task.accountId,
+
+        accountName: task.accountName,
+
+        targetUrl: task.targetUrl!,
+
+        state: "FOLLOWING",
+
+        matchedSelector: null,
+
+        message: "Account sudah mengikuti target berdasarkan page text.",
+      };
+    }
+
+    console.log("⚠️ [XActionExecutor] Follow state tidak dapat ditentukan.");
 
     return {
       accountId: task.accountId,
@@ -365,5 +310,25 @@ export class XActionExecutor {
       "X_QUOTE",
       "X_POST",
     ].includes(taskType);
+  }
+}
+
+class AccountBrowserAdapter implements XBrowserProvider {
+  private readonly accountBrowser = new AccountBrowser(undefined, {
+    headless: true,
+  });
+
+  private browser: BrowserExecutor | null = null;
+
+  async openForAccount(accountId: number): Promise<XBrowser> {
+    this.browser = await this.accountBrowser.openForAccount(accountId);
+
+    return this.browser;
+  }
+
+  async close(): Promise<void> {
+    await this.accountBrowser.close();
+
+    this.browser = null;
   }
 }
