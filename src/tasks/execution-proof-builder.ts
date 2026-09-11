@@ -1,5 +1,5 @@
 import { FormExecutionPlan } from "./form-execution-planner.js";
-import { FormExecutionResult } from "./form-executor.js";
+import type { FormExecutionResult } from "./form-executor.js";
 
 export interface ExecutionProofField {
   index: number;
@@ -22,8 +22,20 @@ export interface ExecutionProof {
   summary: string;
 }
 
+export interface ExecutionProofResultInput {
+  formType: FormExecutionResult["formType"];
+  url: string;
+  fieldsFilled: number;
+  checkboxesChecked: number;
+  submitAttempted: boolean;
+  message: string;
+}
+
 export class ExecutionProofBuilder {
-  build(plan: FormExecutionPlan, result: FormExecutionResult): ExecutionProof {
+  build(
+    plan: FormExecutionPlan,
+    result: ExecutionProofResultInput,
+  ): ExecutionProof {
     const fields: ExecutionProofField[] = plan.fields.map((field) => ({
       index: field.index,
       type: field.type,

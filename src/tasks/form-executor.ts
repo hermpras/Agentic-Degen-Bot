@@ -18,6 +18,10 @@ import {
   FormExecutionPlanner,
   FormExecutionPlan,
 } from "./form-execution-planner.js";
+import {
+  ExecutionProof,
+  ExecutionProofBuilder,
+} from "./execution-proof-builder.js";
 
 export interface FormExecutionResult {
   formType: PlannedForm["formType"];
@@ -26,6 +30,7 @@ export interface FormExecutionResult {
   checkboxesChecked: number;
   submitAttempted: boolean;
   message: string;
+  proof: ExecutionProof;
 }
 
 export class FormExecutor {
@@ -33,6 +38,7 @@ export class FormExecutor {
   private readonly mapper?: FieldMapper;
   private readonly resolver?: FieldMappingResolver;
   private readonly executionPlanner: FormExecutionPlanner;
+  private readonly proofBuilder: ExecutionProofBuilder;
 
   constructor(
     private readonly browser: BrowserExecutor,
@@ -40,6 +46,7 @@ export class FormExecutor {
     mapper?: FieldMapper,
     resolver?: FieldMappingResolver,
     executionPlanner?: FormExecutionPlanner,
+    proofBuilder?: ExecutionProofBuilder,
   ) {
     this.inspector = inspector;
     this.mapper = mapper;
@@ -48,6 +55,8 @@ export class FormExecutor {
       resolver ?? (mapper ? new FieldMappingResolver(mapper) : undefined);
 
     this.executionPlanner = executionPlanner ?? new FormExecutionPlanner();
+
+    this.proofBuilder = proofBuilder ?? new ExecutionProofBuilder();
   }
 
   async openForm(form: PlannedForm): Promise<string> {
@@ -111,6 +120,7 @@ export class FormExecutor {
       const inspection = await this.inspector.inspect();
 
       inspectedFields = inspection.fields;
+
       inspectedCheckboxes = inspection.checkboxes;
 
       console.log(
@@ -176,13 +186,33 @@ export class FormExecutor {
       `📝 [FormExecutor] Form filled: ${fieldsFilled} fields, ${checkboxesChecked} checkboxes.`,
     );
 
-    return {
+    /*
+     * Step 3:
+     * Build execution result.
+     *
+     * Submit tetap TIDAK dilakukan.
+     */
+    const resultWithoutProof = {
       formType: form.formType,
       url: form.targetUrl,
       fieldsFilled,
       checkboxesChecked,
       submitAttempted: false,
       message: "Form berhasil diisi tetapi belum disubmit.",
+    };
+
+    /*
+     * Step 4:
+     * Build audit/proof dari execution plan
+     * dan execution result.
+     */
+    const proof = this.proofBuilder.build(executionPlan, resultWithoutProof);
+
+    console.log(`🧾 [FormExecutor] Execution proof created: ${proof.summary}`);
+
+    return {
+      ...resultWithoutProof,
+      proof,
     };
   }
 
