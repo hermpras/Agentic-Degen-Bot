@@ -1,5 +1,28 @@
 import { AccountBrowser } from "../browser/account-browser.js";
+import { BrowserExecutor } from "../browser/browser-executor.js";
 import { PlannedTask } from "./task-planner.js";
+
+export interface XBrowser {
+  open(url: string): Promise<{
+    url: string;
+    title: string;
+    text: string;
+  }>;
+
+  elementExists(selector: string): Promise<boolean>;
+
+  click(selector: string): Promise<void>;
+
+  getText(selector: string): Promise<string>;
+
+  getCurrentUrl(): string;
+}
+
+export interface XBrowserProvider {
+  openForAccount(accountId: number): Promise<XBrowser>;
+
+  close(): Promise<void>;
+}
 
 export type XActionType =
   | "X_FOLLOW"
@@ -30,6 +53,10 @@ export interface XActionResult {
 }
 
 export class XActionExecutor {
+  constructor(
+    private readonly browserProvider: XBrowserProvider = new AccountBrowserAdapter(),
+  ) {}
+
   async inspectFollow(task: PlannedTask): Promise<XFollowInspectionResult> {
     if (!task.targetUrl) {
       throw new Error(`Task ${task.planTaskId} membutuhkan targetUrl.`);
@@ -40,18 +67,14 @@ export class XActionExecutor {
       `𝕏 [XActionExecutor] Inspect X_FOLLOW → Account ${task.accountId}`,
     );
 
-    const accountBrowser = new AccountBrowser(undefined, {
-      headless: true,
-    });
-
     try {
-      const browser = await accountBrowser.openForAccount(task.accountId);
+      const browser = await this.browserProvider.openForAccount(task.accountId);
 
       await browser.open(task.targetUrl);
 
       return await this.inspectFollowOnBrowser(browser, task);
     } finally {
-      await accountBrowser.close();
+      await this.browserProvider.close();
     }
   }
 
@@ -79,12 +102,8 @@ export class XActionExecutor {
       `𝕏 [XActionExecutor] Preparing X_FOLLOW → Account ${task.accountId}`,
     );
 
-    const accountBrowser = new AccountBrowser(undefined, {
-      headless: true,
-    });
-
     try {
-      const browser = await accountBrowser.openForAccount(task.accountId);
+      const browser = await this.browserProvider.openForAccount(task.accountId);
 
       await browser.open(task.targetUrl!);
 
@@ -172,14 +191,12 @@ export class XActionExecutor {
         }),
       };
     } finally {
-      await accountBrowser.close();
+      await this.browserProvider.close();
     }
   }
 
   private async inspectFollowOnBrowser(
-    browser: {
-      elementExists(selector: string): Promise<boolean>;
-    },
+    browser: XBrowser,
     task: PlannedTask,
   ): Promise<XFollowInspectionResult> {
     const followSelectors = [
@@ -291,5 +308,25 @@ export class XActionExecutor {
       "X_QUOTE",
       "X_POST",
     ].includes(taskType);
+  }
+}
+
+class AccountBrowserAdapter implements XBrowserProvider {
+  private readonly accountBrowser = new AccountBrowser(undefined, {
+    headless: true,
+  });
+
+  private browser: BrowserExecutor | null = null;
+
+  async openForAccount(accountId: number): Promise<XBrowser> {
+    this.browser = await this.accountBrowser.openForAccount(accountId);
+
+    return this.browser;
+  }
+
+  async close(): Promise<void> {
+    await this.accountBrowser.close();
+
+    this.browser = null;
   }
 }
