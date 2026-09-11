@@ -14,7 +14,6 @@ export class AgentDatabase {
     }
 
     this.db = new Database(fullPath);
-
     this.initSchema();
   }
 
@@ -75,6 +74,7 @@ export class AgentDatabase {
         project_id INTEGER NOT NULL,
         account_id INTEGER NOT NULL,
         task_type TEXT NOT NULL,
+        target_url TEXT,
         description TEXT,
         status TEXT NOT NULL DEFAULT 'PENDING',
         proof TEXT,
@@ -125,6 +125,29 @@ export class AgentDatabase {
       CREATE INDEX IF NOT EXISTS idx_eligibility_account_id
       ON eligibility_checks(account_id);
     `);
+
+    this.runMigrations();
+  }
+
+  private runMigrations(): void {
+    const taskColumns = this.db.pragma("table_info(tasks)") as Array<{
+      name: string;
+    }>;
+
+    const hasTargetUrl = taskColumns.some(
+      (column) => column.name === "target_url",
+    );
+
+    if (!hasTargetUrl) {
+      this.db.exec(`
+        ALTER TABLE tasks
+        ADD COLUMN target_url TEXT;
+      `);
+
+      console.log(
+        "🗄️ [Database] Migration applied: tasks.target_url ditambahkan.",
+      );
+    }
   }
 
   getDb(): Database.Database {
