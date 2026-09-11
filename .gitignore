@@ -20,3 +20,6 @@ dist/
 
 # Playwright browser authentication/session state
 playwright/.auth/
+# Playwright / Chrome local profiles
+playwright/chrome-profiles/
+playwright/.auth/
