@@ -168,9 +168,19 @@ export class XActionExecutor {
       throw new Error(`Task ${task.planTaskId} membutuhkan targetUrl.`);
     }
 
+    if (task.taskType === "X_FOLLOW") {
+      return this.executeFollowWithInspection(task);
+    }
+
+    throw new Error(`X action "${task.taskType}" belum memiliki executor.`);
+  }
+
+  private async executeFollowWithInspection(
+    task: PlannedTask,
+  ): Promise<XActionResult> {
     console.log("");
     console.log(
-      `𝕏 [XActionExecutor] ${task.taskType} → Account ${task.accountId}`,
+      `𝕏 [XActionExecutor] Preparing X_FOLLOW → Account ${task.accountId}`,
     );
 
     const accountBrowser = new AccountBrowser(undefined, {
@@ -180,43 +190,13 @@ export class XActionExecutor {
     try {
       const browser = await accountBrowser.openForAccount(task.accountId);
 
-      await browser.open(task.targetUrl);
+      await browser.open(task.targetUrl!);
 
-      switch (task.taskType) {
-        case "X_FOLLOW":
-          return await this.executeFollow(browser, task);
+      const inspection = await this.inspectFollowOnBrowser(browser, task);
 
-        default:
-          throw new Error(
-            `X action "${task.taskType}" belum memiliki executor.`,
-          );
-      }
-    } finally {
-      await accountBrowser.close();
-    }
-  }
-
-  private async executeFollow(
-    browser: {
-      click(selector: string): Promise<void>;
-
-      getText(selector: string): Promise<string>;
-
-      getCurrentUrl(): string;
-    },
-    task: PlannedTask,
-  ): Promise<XActionResult> {
-    const selectors = [
-      'button[data-testid="followButton"]',
-      'button:has-text("Follow")',
-    ];
-
-    for (const selector of selectors) {
-      try {
-        await browser.click(selector);
-
+      if (inspection.state === "FOLLOWING") {
         console.log(
-          `𝕏 [XActionExecutor] Follow berhasil menggunakan selector: ${selector}`,
+          "✅ [XActionExecutor] Target sudah di-follow. Tidak melakukan click.",
         );
 
         return {
@@ -237,24 +217,36 @@ export class XActionExecutor {
 
             accountName: task.accountName,
 
-            currentUrl: browser.getCurrentUrl(),
+            state: "FOLLOWING",
+
+            alreadyFollowing: true,
+
+            actionPerformed: false,
+
+            matchedSelector: inspection.matchedSelector,
           }),
         };
-      } catch {
-        // Coba selector berikutnya.
       }
-    }
 
-    let pageText = "";
+      if (inspection.state === "UNKNOWN") {
+        throw new Error(
+          `Follow state tidak dapat ditentukan pada ${task.targetUrl}. Action dibatalkan.`,
+        );
+      }
 
-    try {
-      pageText = await browser.getText("body");
-    } catch {
-      // Ignore body read failure.
-    }
+      const selector = inspection.matchedSelector;
 
-    if (pageText.toLowerCase().includes("following")) {
-      console.log("𝕏 [XActionExecutor] Account sudah follow target.");
+      if (!selector) {
+        throw new Error(
+          "Follow button terdeteksi tetapi selector tidak tersedia.",
+        );
+      }
+
+      await browser.click(selector);
+
+      console.log(
+        `𝕏 [XActionExecutor] Follow berhasil menggunakan selector: ${selector}`,
+      );
 
       return {
         accountId: task.accountId,
@@ -274,14 +266,93 @@ export class XActionExecutor {
 
           accountName: task.accountName,
 
-          alreadyFollowing: true,
+          state: "FOLLOW",
+
+          actionPerformed: true,
+
+          matchedSelector: selector,
 
           currentUrl: browser.getCurrentUrl(),
         }),
       };
+    } finally {
+      await accountBrowser.close();
+    }
+  }
+
+  private async inspectFollowOnBrowser(
+    browser: {
+      getText(selector: string): Promise<string>;
+    },
+    task: PlannedTask,
+  ): Promise<XFollowInspectionResult> {
+    const followSelectors = [
+      'button[data-testid="followButton"]',
+      'button:text-is("Follow")',
+    ];
+
+    for (const selector of followSelectors) {
+      try {
+        await browser.getText(selector);
+
+        return {
+          accountId: task.accountId,
+
+          accountName: task.accountName,
+
+          targetUrl: task.targetUrl!,
+
+          state: "FOLLOW",
+
+          matchedSelector: selector,
+
+          message: "Target belum di-follow.",
+        };
+      } catch {
+        // Coba selector berikutnya.
+      }
     }
 
-    throw new Error(`Tombol Follow tidak ditemukan pada ${task.targetUrl}.`);
+    const followingSelectors = [
+      'button[data-testid="unfollowButton"]',
+      'button:text-is("Following")',
+    ];
+
+    for (const selector of followingSelectors) {
+      try {
+        await browser.getText(selector);
+
+        return {
+          accountId: task.accountId,
+
+          accountName: task.accountName,
+
+          targetUrl: task.targetUrl!,
+
+          state: "FOLLOWING",
+
+          matchedSelector: selector,
+
+          message: "Account sudah mengikuti target.",
+        };
+      } catch {
+        // Coba selector berikutnya.
+      }
+    }
+
+    return {
+      accountId: task.accountId,
+
+      accountName: task.accountName,
+
+      targetUrl: task.targetUrl!,
+
+      state: "UNKNOWN",
+
+      matchedSelector: null,
+
+      message: "Follow state tidak dapat ditentukan.",
+    };
   }
 
   private isXAction(taskType: string): taskType is XActionType {

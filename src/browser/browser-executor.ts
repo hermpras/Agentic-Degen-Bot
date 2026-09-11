@@ -23,7 +23,9 @@ export class BrowserExecutor {
 
   constructor(options: BrowserExecutorOptions = {}) {
     this.headless = options.headless ?? true;
+
     this.timeoutMs = options.timeoutMs ?? 30_000;
+
     this.storageStatePath = options.storageStatePath?.trim() || undefined;
   }
 
@@ -101,6 +103,20 @@ export class BrowserExecutor {
     };
   }
 
+  async elementExists(selector: string): Promise<boolean> {
+    const page = await this.getPage();
+
+    const normalizedSelector = selector.trim();
+
+    if (!normalizedSelector) {
+      throw new Error("Selector elementExists tidak boleh kosong.");
+    }
+
+    const count = await page.locator(normalizedSelector).count();
+
+    return count > 0;
+  }
+
   async click(selector: string): Promise<void> {
     const page = await this.getPage();
 
@@ -133,6 +149,7 @@ export class BrowserExecutor {
     const page = await this.getPage();
 
     const normalizedSelector = selector.trim();
+
     const normalizedKey = key.trim();
 
     if (!normalizedSelector) {
@@ -169,6 +186,7 @@ export class BrowserExecutor {
     const page = await this.getPage();
 
     const normalizedSelector = selector.trim();
+
     const normalizedAttribute = attribute.trim();
 
     if (!normalizedSelector) {
