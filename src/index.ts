@@ -1,16 +1,14 @@
-import { Bot, InlineKeyboard } from "grammy";
-
+import { Bot } from "grammy";
 import { config } from "./config/index.js";
 import { GeminiProvider } from "./providers/gemini.provider.js";
+import { AgentDatabase } from "./database/agent-database.js";
 import { MemoryManager } from "./memory/memory-manager.js";
 import { buildAgentProfiles } from "./agents/agent-profiles.js";
 import { Orchestrator } from "./orchestrator/orchestrator.js";
-import { ApprovalService } from "./approval/approval-service.js";
 import { ensureWorkspaceDirExists } from "./tools/impl/workspace.utils.js";
+import { ApprovalService } from "./approval/approval-service.js";
 
-console.log(
-  "🤖 Menyiapkan Degen Agent AI (Phase 5: Specialized Agents & Orchestrator)...",
-);
+console.log("🤖 Menyiapkan Degen Agent AI...");
 
 if (!config.telegramBotToken || !config.geminiApiKey) {
   console.error(
@@ -22,13 +20,17 @@ if (!config.telegramBotToken || !config.geminiApiKey) {
 
 ensureWorkspaceDirExists();
 
-const memoryManager = new MemoryManager("data/agent.db");
+const database = new AgentDatabase("data/agent.db");
 
-console.log("💾 SQLite Memory Manager aktif (data/agent.db)");
+console.log("💾 SQLite Database aktif (data/agent.db)");
+
+const memoryManager = new MemoryManager(database);
+
+console.log("🧠 Memory Manager aktif.");
 
 const llmProvider = new GeminiProvider(config.geminiApiKey);
 
-const profiles = buildAgentProfiles(llmProvider, memoryManager);
+const profiles = buildAgentProfiles(llmProvider, memoryManager, database);
 
 console.log(
   `🧠 Agent profiles siap (${profiles.length}): [${profiles
@@ -50,7 +52,7 @@ const bot = new Bot(config.telegramBotToken);
 
 bot.command("start", async (ctx) => {
   await ctx.reply(
-    "👋 Halo! Saya Degen AI Agent (Phase 5 - Specialized Agents Enabled).\n\nSekarang saya otomatis memilih agent yang paling cocok buat menjawab pertanyaan kamu (General/Research vs Dev & HoodBear), dan tetap mengingat riwayat percakapan kita.",
+    "👋 Halo! Saya Degen AI Agent.\n\nSaya bisa melakukan riset, development, menggunakan tools, dan mengingat percakapan kita.",
   );
 });
 
@@ -63,25 +65,41 @@ bot.on("message:text", async (ctx) => {
   try {
     const aiReply = await orchestrator.route(userText, chatId);
 
-    const approvalRequest = approvalServices
+    const pendingApproval = approvalServices
       .flatMap((service) => service.getPendingRequests())
       .find((request) => request.chatId === chatId);
 
-    if (approvalRequest) {
-      const keyboard = new InlineKeyboard()
-        .text("✅ Approve", `approve:${approvalRequest.id}`)
-        .text("❌ Reject", `reject:${approvalRequest.id}`);
-
-      await ctx.api.editMessageText(
-        ctx.chat.id,
-        loadingMsg.message_id,
-        aiReply,
-        {
-          reply_markup: keyboard,
-        },
+    if (pendingApproval) {
+      const service = approvalServices.find(
+        (candidate) =>
+          candidate.getRequest(pendingApproval.id)?.id === pendingApproval.id,
       );
 
-      return;
+      if (service) {
+        await ctx.api.editMessageText(
+          ctx.chat.id,
+          loadingMsg.message_id,
+          aiReply,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "✅ Approve",
+                    callback_data: `approve:${pendingApproval.id}`,
+                  },
+                  {
+                    text: "❌ Reject",
+                    callback_data: `reject:${pendingApproval.id}`,
+                  },
+                ],
+              ],
+            },
+          },
+        );
+
+        return;
+      }
     }
 
     await ctx.api.editMessageText(ctx.chat.id, loadingMsg.message_id, aiReply);
@@ -98,121 +116,80 @@ bot.on("message:text", async (ctx) => {
 
 bot.callbackQuery(/^approve:(.+)$/, async (ctx) => {
   const approvalId = ctx.match[1];
-
   const chatId = ctx.callbackQuery.message?.chat.id;
 
   if (chatId === undefined) {
     await ctx.answerCallbackQuery({
-      text: "❌ Chat tidak ditemukan.",
+      text: "Chat tidak ditemukan.",
       show_alert: true,
     });
 
     return;
   }
 
-  console.log(
-    `🔐 [Telegram Approval] Approve request ${approvalId} dari chat ${chatId}`,
+  const service = approvalServices.find(
+    (candidate) => candidate.getRequest(approvalId)?.chatId === chatId,
   );
 
-  for (const service of approvalServices) {
-    const request = service.getRequest(approvalId);
-
-    if (!request) {
-      continue;
-    }
-
-    if (request.chatId !== chatId) {
-      await ctx.answerCallbackQuery({
-        text: "❌ Approval ini bukan milik chat kamu.",
-        show_alert: true,
-      });
-
-      return;
-    }
-
-    const result = await service.approveAndExecute(approvalId, chatId);
-
+  if (!service) {
     await ctx.answerCallbackQuery({
-      text: "✅ Approval diproses.",
+      text: "Approval request tidak ditemukan.",
+      show_alert: true,
     });
-
-    await ctx.reply(`🔐 Approval selesai.\n\nHasil:\n${result}`);
 
     return;
   }
 
   await ctx.answerCallbackQuery({
-    text: "❌ Approval request tidak ditemukan.",
-    show_alert: true,
+    text: "Approval disetujui.",
   });
+
+  const result = await service.approveAndExecute(approvalId, chatId);
+
+  await ctx.reply(result);
 });
 
 bot.callbackQuery(/^reject:(.+)$/, async (ctx) => {
   const approvalId = ctx.match[1];
-
   const chatId = ctx.callbackQuery.message?.chat.id;
 
   if (chatId === undefined) {
     await ctx.answerCallbackQuery({
-      text: "❌ Chat tidak ditemukan.",
+      text: "Chat tidak ditemukan.",
       show_alert: true,
     });
 
     return;
   }
 
-  console.log(
-    `🔐 [Telegram Approval] Reject request ${approvalId} dari chat ${chatId}`,
+  const service = approvalServices.find(
+    (candidate) => candidate.getRequest(approvalId)?.chatId === chatId,
   );
 
-  for (const service of approvalServices) {
-    const request = service.getRequest(approvalId);
-
-    if (!request) {
-      continue;
-    }
-
-    if (request.chatId !== chatId) {
-      await ctx.answerCallbackQuery({
-        text: "❌ Approval ini bukan milik chat kamu.",
-        show_alert: true,
-      });
-
-      return;
-    }
-
-    const rejectedRequest = service.rejectForChat(approvalId, chatId);
-
-    if (!rejectedRequest) {
-      await ctx.answerCallbackQuery({
-        text: "❌ Gagal menolak approval.",
-        show_alert: true,
-      });
-
-      return;
-    }
-
+  if (!service) {
     await ctx.answerCallbackQuery({
-      text: "❌ Tool ditolak.",
+      text: "Approval request tidak ditemukan.",
+      show_alert: true,
     });
-
-    await ctx.reply(
-      `❌ Approval ditolak.\n\nTool: ${rejectedRequest.toolName}`,
-    );
 
     return;
   }
 
+  const rejected = service.rejectForChat(approvalId, chatId);
+
   await ctx.answerCallbackQuery({
-    text: "❌ Approval request tidak ditemukan.",
-    show_alert: true,
+    text: rejected ? "Approval ditolak." : "Approval request tidak ditemukan.",
   });
+
+  await ctx.reply(
+    rejected
+      ? "❌ Approval ditolak. Tool tidak dijalankan."
+      : "⚠️ Approval request tidak ditemukan.",
+  );
 });
 
 bot.start({
   onStart: (botInfo) => {
-    console.log(
-      `✅ Bot @${botInfo.username} online dan siap mengingat percakapan!`,
-    );
+    console.log(`✅ Bot @${botInfo.username} online dan siap!`);
   },
 });

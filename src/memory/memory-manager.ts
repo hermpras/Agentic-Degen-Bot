@@ -2,19 +2,12 @@ import { LLMMessage } from "../providers/llm.interface.js";
 import { AgentDatabase } from "../database/agent-database.js";
 
 export class MemoryManager {
-  private database: AgentDatabase;
-
-  constructor(dbPathRelative = "data/agent.db") {
-    this.database = new AgentDatabase(dbPathRelative);
-  }
+  constructor(private readonly database: AgentDatabase) {}
 
   private get db() {
     return this.database.getDb();
   }
 
-  /**
-   * Menyimpan satu pesan ke dalam tabel messages.
-   */
   saveMessage(
     chatId: string | number,
     role: "user" | "assistant" | "tool",
@@ -27,12 +20,6 @@ export class MemoryManager {
     stmt.run(String(chatId), role, content);
   }
 
-  /**
-   * Mengambil N pesan terakhir (default: 20) untuk chat_id tertentu.
-   *
-   * Diurutkan secara kronologis (terlama ke terbaru)
-   * untuk dikirim ke LLM Provider.
-   */
   getRecentMessages(chatId: string | number, limit = 20): LLMMessage[] {
     const stmt = this.db.prepare(`
       SELECT role, content FROM (
@@ -46,7 +33,7 @@ export class MemoryManager {
     `);
 
     const rows = stmt.all(String(chatId), limit) as Array<{
-      role: "user" | "assistant" | "tool";
+      role: "assistant" | "user" | "tool";
       content: string;
     }>;
 
@@ -56,9 +43,6 @@ export class MemoryManager {
     }));
   }
 
-  /**
-   * Menghapus seluruh riwayat percakapan untuk chat_id tertentu.
-   */
   clearHistory(chatId: string | number): void {
     const stmt = this.db.prepare("DELETE FROM messages WHERE chat_id = ?");
 

@@ -3,39 +3,56 @@ import { MemoryManager } from "../memory/memory-manager.js";
 import { Agent } from "../agent/agent.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import { ApprovalManager } from "../approval/approval-manager.js";
+import { AgentDatabase } from "../database/agent-database.js";
 
 import { getCurrentTimeTool } from "../tools/impl/get-current-time.tool.js";
 import { webSearchTool } from "../tools/impl/web-search.tool.js";
 import { readFileTool } from "../tools/impl/read-file.tool.js";
 import { writeFileTool } from "../tools/impl/write-file.tool.js";
 import { browsePageTool } from "../tools/impl/browse-page.tool.js";
+
 import { githubReadFileTool } from "../tools/impl/github-read-file.tool.js";
 import { githubListDirectoryTool } from "../tools/impl/github-list-directory.tool.js";
 import { githubGetRecentCommitsTool } from "../tools/impl/github-get-recent-commits.tool.js";
 import { githubGetWorkflowStatusTool } from "../tools/impl/github-get-workflow-status.tool.js";
 
 export interface AgentProfile {
-  /** Nama unik agent, dipakai orchestrator buat routing */
+  /**
+   * Nama unik agent, dipakai orchestrator buat routing.
+   */
   name: string;
 
-  /** Deskripsi buat orchestrator milih agent mana yang cocok untuk sebuah pesan */
+  /**
+   * Deskripsi buat orchestrator milih agent mana yang cocok untuk sebuah pesan.
+   */
   description: string;
 
-  /** Instance agent */
+  /**
+   * Instance agent.
+   */
   agent: Agent;
 
-  /** Approval manager yang dipakai oleh ToolRegistry agent ini */
+  /**
+   * Approval manager yang dipakai oleh ToolRegistry agent ini.
+   */
   approvalManager: ApprovalManager;
 }
 
 /**
  * Bikin semua Agent instance yang tersedia, masing-masing dengan tool & system prompt sendiri.
- * Tambah agent baru di sini kalau mau nambah specialized agent lain (Research, Web3, dst).
+ *
+ * Tambah agent baru di sini kalau mau nambah specialized agent lain
+ * (Research, Web3, dst).
  */
 export function buildAgentProfiles(
   provider: LLMProvider,
   memoryManager: MemoryManager,
+  database: AgentDatabase,
 ): AgentProfile[] {
+  // Database akan digunakan oleh specialized tools,
+  // misalnya AccountManager dan ProjectManager.
+  void database;
+
   // === General Agent — fallback default, buat research/degen/general chat ===
   const generalTools = new ToolRegistry();
 
@@ -75,6 +92,7 @@ export function buildAgentProfiles(
       agent: generalAgent,
       approvalManager: generalTools.getApprovalManager(),
     },
+
     {
       name: "dev_hoodbear",
       description:
