@@ -1,40 +1,10 @@
 import { AgentDatabase } from "../../database/agent-database.js";
 import { ProjectTaskWorkflow } from "../../workflows/project-task-workflow.js";
-import type { TaskPlannerInput } from "../../tasks/task-planner.js";
+import type { TaskPlan } from "../../tasks/task-planner.js";
 import type { Tool } from "../tool.interface.js";
 
-interface WorkflowRequirementInput {
-  type: string;
-  description: string;
-  targetUrl?: string;
-  producesOwnTweetUrl?: boolean;
-  requiresOwnTweetUrl?: boolean;
-  form?: {
-    formType: string;
-    targetUrl: string;
-    fields?: Array<{
-      type: string;
-      label?: string;
-      required?: boolean;
-    }>;
-    checkboxes?: Array<{
-      type: string;
-      label?: string;
-      required?: boolean;
-    }>;
-    submit?: {
-      selector?: string;
-      label?: string;
-      successSelector?: string;
-      successText?: string;
-    };
-  };
-}
-
 interface ExecuteProjectTaskPlanArgs {
-  projectName: string;
-  sourceUrl: string;
-  requirements: WorkflowRequirementInput[];
+  planId: number;
 }
 
 export function executeProjectTaskPlanTool(database: AgentDatabase): Tool {
@@ -42,191 +12,167 @@ export function executeProjectTaskPlanTool(database: AgentDatabase): Tool {
 
   return {
     name: "execute_project_task_plan",
+
     description:
-      "Menjalankan task workflow whitelist/project untuk semua ACTIVE account. Tool ini membuat task plan lalu mengeksekusinya secara berurutan. Tool ini memerlukan approval user sebelum execution dimulai.",
+      "Mengeksekusi task plan yang SUDAH dibuat dan disimpan sebelumnya berdasarkan planId. Tool ini TIDAK membuat atau mengubah task plan. Gunakan hanya setelah user secara eksplisit meminta execution. Tool ini memiliki approval boundary.",
+
     riskLevel: "APPROVAL",
+
     parameters: {
       type: "object",
+
       properties: {
-        projectName: {
-          type: "string",
-          description: "Nama project yang sudah terdaftar di database.",
-        },
-        sourceUrl: {
-          type: "string",
+        planId: {
+          type: "number",
           description:
-            "URL sumber project, website, announcement, Twitter/X, atau halaman requirements.",
-        },
-        requirements: {
-          type: "array",
-          description:
-            "Daftar requirements/task yang harus dilakukan untuk project.",
-          items: {
-            type: "object",
-            properties: {
-              type: {
-                type: "string",
-                description:
-                  "Jenis task, misalnya OPEN_PAGE, X_FOLLOW, X_LIKE, X_REPOST, X_COMMENT, X_REPLY, X_QUOTE, X_POST, FORM, FORM_TWITTER, FORM_WALLET, FORM_SUBMIT, WHITELIST, atau CUSTOM.",
-              },
-              description: {
-                type: "string",
-                description: "Deskripsi task yang harus dilakukan.",
-              },
-              targetUrl: {
-                type: "string",
-                description: "URL target task jika diperlukan.",
-              },
-              producesOwnTweetUrl: {
-                type: "boolean",
-                description:
-                  "Apakah task ini menghasilkan URL tweet milik account.",
-              },
-              requiresOwnTweetUrl: {
-                type: "boolean",
-                description:
-                  "Apakah task ini membutuhkan URL tweet milik account.",
-              },
-              form: {
-                type: "object",
-                description:
-                  "Konfigurasi form jika task membutuhkan pengisian form.",
-                properties: {
-                  formType: {
-                    type: "string",
-                    description: "Tipe form: WEBSITE atau GOOGLE_FORM.",
-                  },
-                  targetUrl: {
-                    type: "string",
-                    description: "URL form yang akan dibuka.",
-                  },
-                  fields: {
-                    type: "array",
-                    description: "Field form yang harus diisi.",
-                    items: {
-                      type: "object",
-                      properties: {
-                        type: {
-                          type: "string",
-                          description: "Tipe field.",
-                        },
-                        label: {
-                          type: "string",
-                          description: "Label field jika diketahui.",
-                        },
-                        required: {
-                          type: "boolean",
-                          description: "Apakah field wajib diisi.",
-                        },
-                      },
-                      required: ["type"],
-                    },
-                  },
-                  checkboxes: {
-                    type: "array",
-                    description: "Checkbox form yang harus dicentang.",
-                    items: {
-                      type: "object",
-                      properties: {
-                        type: {
-                          type: "string",
-                          description: "Tipe checkbox.",
-                        },
-                        label: {
-                          type: "string",
-                          description: "Label checkbox jika diketahui.",
-                        },
-                        required: {
-                          type: "boolean",
-                          description: "Apakah checkbox wajib dicentang.",
-                        },
-                      },
-                      required: ["type"],
-                    },
-                  },
-                  submit: {
-                    type: "object",
-                    description:
-                      "Konfigurasi submit dan verifikasi hasil form.",
-                    properties: {
-                      selector: {
-                        type: "string",
-                        description: "CSS selector tombol submit.",
-                      },
-                      label: {
-                        type: "string",
-                        description: "Label tombol submit.",
-                      },
-                      successSelector: {
-                        type: "string",
-                        description:
-                          "CSS selector yang harus muncul setelah submit berhasil.",
-                      },
-                      successText: {
-                        type: "string",
-                        description:
-                          "Teks yang harus muncul setelah submit berhasil.",
-                      },
-                    },
-                  },
-                },
-                required: ["formType", "targetUrl"],
-              },
-            },
-            required: ["type", "description"],
-          },
+            "ID plan yang sudah dibuat oleh create_project_task_plan dan ingin dieksekusi.",
         },
       },
-      required: ["projectName", "sourceUrl", "requirements"],
+
+      required: ["planId"],
     },
 
     async execute(args: Record<string, any>): Promise<any> {
       const input = args as ExecuteProjectTaskPlanArgs;
 
-      if (!input.projectName || typeof input.projectName !== "string") {
-        throw new Error("projectName wajib diisi.");
-      }
-
-      if (!input.sourceUrl || typeof input.sourceUrl !== "string") {
-        throw new Error("sourceUrl wajib diisi.");
-      }
-
       if (
-        !Array.isArray(input.requirements) ||
-        input.requirements.length === 0
+        input.planId === undefined ||
+        input.planId === null ||
+        typeof input.planId !== "number" ||
+        !Number.isInteger(input.planId) ||
+        input.planId <= 0
       ) {
+        throw new Error("planId wajib berupa angka integer positif.");
+      }
+
+      const storedPlan = database.getTaskPlan(input.planId);
+
+      if (!storedPlan) {
         throw new Error(
-          "requirements wajib berupa array dan minimal memiliki satu requirement.",
+          `Task plan #${input.planId} tidak ditemukan di database.`,
         );
       }
 
-      const plannerInput: TaskPlannerInput = {
-        projectName: input.projectName.trim(),
-        sourceUrl: input.sourceUrl.trim(),
-        requirements: input.requirements as any,
-      };
+      if (storedPlan.status !== "PLANNED") {
+        throw new Error(
+          `Task plan #${input.planId} tidak bisa dieksekusi karena status saat ini adalah "${storedPlan.status}".`,
+        );
+      }
+
+      let plan: TaskPlan;
+
+      try {
+        plan = JSON.parse(storedPlan.planJson) as TaskPlan;
+      } catch {
+        throw new Error(
+          `Snapshot task plan #${input.planId} rusak dan tidak dapat dibaca.`,
+        );
+      }
+
+      validateStoredPlan(plan, storedPlan);
 
       console.log(
-        `🚀 [execute_project_task_plan] Memulai workflow untuk project "${plannerInput.projectName}".`,
+        `🚀 [execute_project_task_plan] Mengeksekusi plan #${input.planId} untuk project "${plan.projectName}".`,
       );
 
-      const result = await workflow.run(plannerInput);
+      database.updateTaskPlanStatus(input.planId, "EXECUTING");
 
-      return {
-        success: true,
-        executionStarted: true,
-        message: "Project task workflow berhasil dieksekusi.",
-        projectName: result.plan.projectName,
-        accountCount: result.plan.accountCount,
-        taskCount: result.plan.taskCount,
-        report: {
-          totalTasks: result.report.totalTasks,
-          completedTasks: result.report.completedTasks,
-          failedTasks: result.report.failedTasks,
-          skippedTasks: result.report.skippedTasks,
-          results: result.report.results,
-        },
-      };
+      try {
+        const report = await workflow.executePlan(plan);
+
+        const finalStatus = report.failedTasks > 0 ? "FAILED" : "COMPLETED";
+
+        database.updateTaskPlanStatus(input.planId, finalStatus);
+
+        return {
+          success: report.failedTasks === 0,
+          executionStarted: true,
+          planId: input.planId,
+          status: finalStatus,
+
+          message:
+            report.failedTasks === 0
+              ? `Task plan #${input.planId} berhasil dieksekusi.`
+              : `Task plan #${input.planId} selesai dengan ${report.failedTasks} task gagal.`,
+
+          projectName: plan.projectName,
+          sourceUrl: plan.sourceUrl,
+          accountCount: plan.accountCount,
+          taskCount: plan.taskCount,
+
+          report: {
+            totalTasks: report.totalTasks,
+            completedTasks: report.completedTasks,
+            failedTasks: report.failedTasks,
+            skippedTasks: report.skippedTasks,
+            results: report.results,
+          },
+        };
+      } catch (error) {
+        database.updateTaskPlanStatus(input.planId, "FAILED");
+
+        throw error;
+      }
     },
   };
+}
+
+function validateStoredPlan(
+  plan: TaskPlan,
+  storedPlan: {
+    projectName: string;
+    sourceUrl: string;
+    accountCount: number;
+    taskCount: number;
+  },
+): void {
+  if (!plan || typeof plan !== "object") {
+    throw new Error("Snapshot task plan tidak valid.");
+  }
+
+  if (!plan.projectName?.trim()) {
+    throw new Error("Snapshot task plan tidak memiliki projectName.");
+  }
+
+  if (!plan.sourceUrl?.trim()) {
+    throw new Error("Snapshot task plan tidak memiliki sourceUrl.");
+  }
+
+  if (!Array.isArray(plan.tasks)) {
+    throw new Error("Snapshot task plan memiliki tasks yang tidak valid.");
+  }
+
+  if (plan.taskCount !== plan.tasks.length) {
+    throw new Error(
+      `Snapshot task plan tidak konsisten: taskCount=${plan.taskCount}, actual=${plan.tasks.length}.`,
+    );
+  }
+
+  if (plan.accountCount <= 0) {
+    throw new Error("Snapshot task plan tidak memiliki account.");
+  }
+
+  if (plan.accountCount !== storedPlan.accountCount) {
+    throw new Error(
+      `Snapshot task plan tidak konsisten dengan database: accountCount=${plan.accountCount}, stored=${storedPlan.accountCount}.`,
+    );
+  }
+
+  if (plan.taskCount !== storedPlan.taskCount) {
+    throw new Error(
+      `Snapshot task plan tidak konsisten dengan database: taskCount=${plan.taskCount}, stored=${storedPlan.taskCount}.`,
+    );
+  }
+
+  if (plan.projectName !== storedPlan.projectName) {
+    throw new Error(
+      `Snapshot task plan tidak konsisten dengan database: projectName="${plan.projectName}", stored="${storedPlan.projectName}".`,
+    );
+  }
+
+  if (plan.sourceUrl !== storedPlan.sourceUrl) {
+    throw new Error(
+      `Snapshot task plan tidak konsisten dengan database: sourceUrl berbeda.`,
+    );
+  }
 }
