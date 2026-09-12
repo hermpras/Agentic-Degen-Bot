@@ -49,6 +49,38 @@ const bot = new Bot(config.telegramBotToken);
 
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4000;
 
+interface ExecutionTaskResult {
+  planTaskId?: string;
+  taskId?: number;
+  projectName?: string;
+  accountName?: string;
+  taskType?: string;
+  status?: string;
+  output?: string;
+  error?: string | null;
+}
+
+interface ExecutionReport {
+  totalTasks?: number;
+  completedTasks?: number;
+  failedTasks?: number;
+  skippedTasks?: number;
+  results?: ExecutionTaskResult[];
+}
+
+interface ExecutionResult {
+  success?: boolean;
+  executionStarted?: boolean;
+  planId?: number;
+  status?: string;
+  message?: string;
+  projectName?: string;
+  sourceUrl?: string;
+  accountCount?: number;
+  taskCount?: number;
+  report?: ExecutionReport;
+}
+
 function splitTelegramMessage(text: string): string[] {
   if (text.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
     return [text];
@@ -82,6 +114,104 @@ async function replyLongMessage(ctx: Context, text: string): Promise<void> {
   for (const chunk of chunks) {
     await ctx.reply(chunk);
   }
+}
+
+function parseExecutionResult(result: string): ExecutionResult | null {
+  try {
+    const parsed: unknown = JSON.parse(result);
+
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return null;
+    }
+
+    return parsed as ExecutionResult;
+  } catch {
+    return null;
+  }
+}
+
+function formatTaskStatus(status?: string): string {
+  switch (status) {
+    case "DONE":
+      return "✅";
+
+    case "FAILED":
+      return "❌";
+
+    case "IN_PROGRESS":
+      return "🔄";
+
+    case "PENDING":
+      return "⏳";
+
+    default:
+      return "•";
+  }
+}
+
+function formatExecutionResult(result: string): string {
+  const parsed = parseExecutionResult(result);
+
+  if (!parsed?.report) {
+    return result;
+  }
+
+  const report = parsed.report;
+  const results = report.results ?? [];
+
+  const lines: string[] = [];
+
+  if (parsed.status === "COMPLETED") {
+    lines.push("✅ Execution completed");
+  } else if (parsed.status === "PARTIAL") {
+    lines.push("🟡 Execution partially completed");
+  } else if (parsed.status === "BLOCKED") {
+    lines.push("⏸️ Execution blocked");
+  } else {
+    lines.push("📋 Execution finished");
+  }
+
+  lines.push("");
+
+  if (parsed.projectName) {
+    lines.push(`🦍 ${parsed.projectName}`);
+  }
+
+  if (parsed.planId !== undefined) {
+    lines.push(`📋 Plan #${parsed.planId}`);
+  }
+
+  lines.push("");
+
+  for (const task of results) {
+    const icon = formatTaskStatus(task.status);
+    const accountName = task.accountName ?? "Unknown account";
+    const taskType = task.taskType ?? "UNKNOWN";
+
+    lines.push(`${icon} ${accountName} — ${taskType}`);
+
+    if (task.status === "FAILED" && task.error) {
+      lines.push(`   └─ ${task.error}`);
+    }
+  }
+
+  lines.push("");
+
+  const totalTasks = report.totalTasks ?? results.length;
+  const completedTasks = report.completedTasks ?? 0;
+  const failedTasks = report.failedTasks ?? 0;
+  const skippedTasks = report.skippedTasks ?? 0;
+
+  lines.push("📊 Summary");
+  lines.push(`✅ ${completedTasks}/${totalTasks} completed`);
+  lines.push(`❌ ${failedTasks} failed`);
+  lines.push(`⏭️ ${skippedTasks} skipped`);
+
+  return lines.join("\n");
 }
 
 bot.command("start", async (ctx) => {
@@ -178,9 +308,11 @@ bot.callbackQuery(/^approve:(.+)$/, async (ctx) => {
   });
 
   try {
-    const result = await service.approveAndExecute(approvalId, chatId);
+    const rawResult = await service.approveAndExecute(approvalId, chatId);
 
-    await replyLongMessage(ctx, result);
+    const formattedResult = formatExecutionResult(rawResult);
+
+    await replyLongMessage(ctx, formattedResult);
   } catch (error) {
     console.error(`Error saat menjalankan approval ${approvalId}:`, error);
 
