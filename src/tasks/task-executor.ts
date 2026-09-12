@@ -3,6 +3,11 @@ import { BrowserExecutor } from "../browser/browser-executor.js";
 import { TaskManager, TaskStatus } from "./task-manager.js";
 import { FormExecutor } from "./form-executor.js";
 import { XActionExecutor, type XActionResult } from "./x-action-executor.js";
+import {
+  AdaptiveWebExecutor,
+  type AdaptiveWebExecutionContext,
+} from "./adaptive-web-executor.js";
+import { GeminiProvider } from "../providers/gemini.provider.js";
 import type { PlannedTask } from "./task-planner.js";
 
 export interface TaskExecutionResult {
@@ -33,15 +38,20 @@ export class TaskExecutor {
   private readonly taskManager: TaskManager;
   private readonly xActionExecutor: XActionExecutor;
   private readonly formExecutor?: FormExecutor;
+  private readonly adaptiveWebExecutor: AdaptiveWebExecutor;
 
   constructor(
     private readonly database: AgentDatabase,
     xActionExecutor?: XActionExecutor,
     formExecutor?: FormExecutor,
+    adaptiveWebExecutor?: AdaptiveWebExecutor,
   ) {
     this.taskManager = new TaskManager(database);
     this.xActionExecutor = xActionExecutor ?? new XActionExecutor();
     this.formExecutor = formExecutor;
+
+    this.adaptiveWebExecutor =
+      adaptiveWebExecutor ?? this.createDefaultAdaptiveWebExecutor();
   }
 
   async executePlan(tasks: PlannedTask[]): Promise<TaskExecutionReport> {
@@ -78,6 +88,7 @@ export class TaskExecutor {
     completedPlanTaskIds = new Set<string>(),
   ): Promise<TaskExecutionResult> {
     console.log("");
+
     console.log(
       `⚙️ [TaskExecutor] Executing ${task.taskType} → ${task.projectName} / ${task.accountName}`,
     );
@@ -391,28 +402,96 @@ export class TaskExecutor {
     task: PlannedTask,
     databaseTaskId: number,
   ): Promise<TaskActionResult> {
-    console.log(`📝 [TaskExecutor] WHITELIST task: ${task.description}`);
-
-    if (task.form) {
-      return this.executeFormTask(task, databaseTaskId);
+    if (!task.targetUrl && !task.form?.targetUrl) {
+      throw new Error(
+        `Task ${task.planTaskId} membutuhkan target URL untuk adaptive web execution.`,
+      );
     }
 
-    if (task.targetUrl) {
-      return this.executeOpenPage(task);
+    const targetUrl = task.targetUrl ?? task.form?.targetUrl ?? null;
+
+    if (!targetUrl) {
+      throw new Error(`Task ${task.planTaskId} tidak memiliki target URL.`);
+    }
+
+    console.log(
+      `🧠 [TaskExecutor] WHITELIST → AdaptiveWebExecutor → ${targetUrl}`,
+    );
+
+    const account = this.getAccountContext(task.accountId);
+
+    const context: AdaptiveWebExecutionContext = {
+      account,
+    };
+
+    const goal = [
+      `Complete the whitelist/project task for project "${task.projectName}".`,
+      `Task description: ${task.description}`,
+      `Use the provided account context when the page requires account-specific information.`,
+      `Inspect the actual page and determine the next safe action from the current page state.`,
+      `Complete the normal public task flow when possible.`,
+      `Do not bypass CAPTCHA, anti-bot systems, rate limits, authentication restrictions, or security controls.`,
+      `Do not use private keys.`,
+      `Do not sign wallet messages or transactions.`,
+      `If authentication, wallet connection, wallet signing, or manual approval is required, stop and report BLOCKED.`,
+      `When the page clearly confirms completion, stop with DONE.`,
+    ].join("\n");
+
+    const result = await this.adaptiveWebExecutor.execute(
+      targetUrl,
+      goal,
+      context,
+    );
+
+    const proofJson = JSON.stringify(result.proof, null, 2);
+
+    this.taskManager.saveTaskProof(databaseTaskId, proofJson);
+
+    console.log(
+      `💾 [TaskExecutor] Adaptive web proof tersimpan untuk task #${databaseTaskId}.`,
+    );
+
+    const output = JSON.stringify(
+      {
+        action: "ADAPTIVE_WEB",
+        taskId: databaseTaskId,
+        projectName: task.projectName,
+        accountName: task.accountName,
+        targetUrl,
+        success: result.success,
+        status: result.status,
+        message: result.output,
+        steps: result.steps,
+        finalUrl: result.finalUrl,
+        proof: result.proof,
+      },
+      null,
+      2,
+    );
+
+    if (!result.success) {
+      return {
+        output,
+        status: "FAILED",
+      };
+    }
+
+    if (result.status === "BLOCKED") {
+      return {
+        output,
+        status: "IN_PROGRESS",
+      };
+    }
+
+    if (result.status === "FAILED") {
+      return {
+        output,
+        status: "FAILED",
+      };
     }
 
     return {
-      output: JSON.stringify(
-        {
-          action: "WHITELIST",
-          description: task.description,
-          targetUrl: null,
-          message:
-            "Whitelist task belum memiliki form atau target URL untuk dieksekusi.",
-        },
-        null,
-        2,
-      ),
+      output,
       status: "DONE",
     };
   }
@@ -436,14 +515,79 @@ export class TaskExecutor {
     };
   }
 
+  private createDefaultAdaptiveWebExecutor(): AdaptiveWebExecutor {
+    const apiKey = process.env.GEMINI_API_KEY;
+
+    if (!apiKey) {
+      throw new Error(
+        "GEMINI_API_KEY belum tersedia untuk AdaptiveWebExecutor.",
+      );
+    }
+
+    const llm = new GeminiProvider(
+      apiKey,
+      process.env.GEMINI_MODEL || "gemini-3.5-flash",
+    );
+
+    const browser = new BrowserExecutor({
+      headless: true,
+      timeoutMs: 30000,
+    });
+
+    return new AdaptiveWebExecutor(llm, browser, {
+      maxSteps: 12,
+    });
+  }
+
+  private getAccountContext(
+    accountId: number,
+  ): AdaptiveWebExecutionContext["account"] {
+    const account = this.database
+      .getDb()
+      .prepare(
+        `
+        SELECT
+          id,
+          name,
+          twitter_handle,
+          wallet_address
+        FROM accounts
+        WHERE id = ?
+          AND status = 'ACTIVE'
+        LIMIT 1
+        `,
+      )
+      .get(accountId) as
+      | {
+          id: number;
+          name: string;
+          twitter_handle: string | null;
+          wallet_address: string | null;
+        }
+      | undefined;
+
+    if (!account) {
+      throw new Error(
+        `Account #${accountId} tidak ditemukan atau tidak ACTIVE.`,
+      );
+    }
+
+    return {
+      accountId: account.id,
+      accountName: account.name,
+      twitterHandle: account.twitter_handle,
+      walletAddress: account.wallet_address,
+    };
+  }
+
   private createDatabaseTask(task: PlannedTask): number {
     const projectStmt = this.database.getDb().prepare(`
-        SELECT id
-        FROM projects
-        WHERE name = ?
-        ORDER BY id ASC
-        LIMIT 1
-      `);
+    SELECT id
+    FROM projects
+    WHERE name = ?
+    ORDER BY id ASC
+    LIMIT 1
+  `);
 
     const project = projectStmt.get(task.projectName) as
       | {
@@ -458,16 +602,16 @@ export class TaskExecutor {
     }
 
     const stmt = this.database.getDb().prepare(`
-        INSERT INTO tasks (
-          project_id,
-          account_id,
-          task_type,
-          target_url,
-          description,
-          status
-        )
-        VALUES (?, ?, ?, ?, ?, 'PENDING')
-      `);
+    INSERT INTO tasks (
+      project_id,
+      account_id,
+      task_type,
+      target_url,
+      description,
+      status
+    )
+    VALUES (?, ?, ?, ?, ?, 'PENDING')
+  `);
 
     const result = stmt.run(
       project.id,
