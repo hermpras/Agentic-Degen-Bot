@@ -18,20 +18,10 @@ export class BrowserExecutor {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
 
-  private readonly headless: boolean;
-  private readonly timeoutMs: number;
-  private readonly storageStatePath: string | undefined;
-  private readonly connectOverCDPUrl: string | undefined;
-
-  constructor(options: BrowserExecutorOptions = {}) {
-    this.headless = options.headless ?? true;
-    this.timeoutMs = options.timeoutMs ?? 30_000;
-    this.storageStatePath = options.storageStatePath?.trim() || undefined;
-    this.connectOverCDPUrl = options.connectOverCDPUrl?.trim() || undefined;
-
-    if (this.headless && this.connectOverCDPUrl) {
+  constructor(private readonly options: BrowserExecutorOptions = {}) {
+    if (options.headless && options.connectOverCDPUrl) {
       throw new Error(
-        "BrowserExecutor tidak boleh menggunakan headless=true saat connectOverCDP.",
+        "headless=true tidak bisa dipakai bersama connectOverCDPUrl.",
       );
     }
   }
@@ -41,89 +31,51 @@ export class BrowserExecutor {
       return;
     }
 
-    console.log(
-      `🌐 [BrowserExecutor] Starting browser (headless=${this.headless})...`,
-    );
+    const timeoutMs = this.options.timeoutMs ?? 30000;
 
-    if (this.connectOverCDPUrl) {
-      console.log(
-        `🔗 [BrowserExecutor] Connecting over CDP: ${this.connectOverCDPUrl}`,
+    if (this.options.connectOverCDPUrl) {
+      this.browser = await chromium.connectOverCDP(
+        this.options.connectOverCDPUrl,
       );
-
-      this.browser = await chromium.connectOverCDP(this.connectOverCDPUrl);
 
       const contexts = this.browser.contexts();
 
       if (contexts.length === 0) {
-        throw new Error(
-          "Browser CDP terhubung tetapi tidak memiliki browser context.",
-        );
+        throw new Error("Browser CDP tidak memiliki context.");
       }
 
       this.context = contexts[0];
 
-      this.context.setDefaultTimeout(this.timeoutMs);
-
       const pages = this.context.pages();
 
-      if (pages.length > 0) {
-        this.page = pages[0];
-      } else {
-        this.page = await this.context.newPage();
-      }
+      this.page = pages[0] ?? (await this.context.newPage());
 
-      console.log("🔗 [BrowserExecutor] Connected to existing browser.");
+      this.page.setDefaultTimeout(timeoutMs);
+
       return;
     }
 
-    if (this.storageStatePath) {
-      console.log(
-        `🔐 [BrowserExecutor] Using storage state: ${this.storageStatePath}`,
-      );
-    } else {
-      console.log("🔐 [BrowserExecutor] Starting without saved session.");
-    }
-
     this.browser = await chromium.launch({
-      headless: this.headless,
+      headless: this.options.headless ?? true,
     });
 
     this.context = await this.browser.newContext({
-      storageState: this.storageStatePath,
+      storageState: this.options.storageStatePath,
     });
-
-    this.context.setDefaultTimeout(this.timeoutMs);
 
     this.page = await this.context.newPage();
 
-    console.log("🌐 [BrowserExecutor] Browser ready.");
+    this.page.setDefaultTimeout(timeoutMs);
   }
 
   async open(url: string): Promise<BrowserPageResult> {
-    const page = await this.getPage();
-    const normalizedUrl = url.trim();
+    const page = this.getPage();
 
-    if (!normalizedUrl) {
-      throw new Error("URL browser tidak boleh kosong.");
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      throw new Error(`URL tidak didukung: ${url}`);
     }
 
-    let parsedUrl: URL;
-
-    try {
-      parsedUrl = new URL(normalizedUrl);
-    } catch {
-      throw new Error(`URL browser tidak valid: "${normalizedUrl}".`);
-    }
-
-    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
-      throw new Error(
-        "BrowserExecutor hanya mengizinkan URL http:// atau https://.",
-      );
-    }
-
-    console.log(`🌐 [BrowserExecutor] Opening: ${parsedUrl.toString()}`);
-
-    await page.goto(parsedUrl.toString(), {
+    await page.goto(url, {
       waitUntil: "domcontentloaded",
     });
 
@@ -131,7 +83,7 @@ export class BrowserExecutor {
   }
 
   async getPageResult(): Promise<BrowserPageResult> {
-    const page = await this.getPage();
+    const page = this.getPage();
 
     return {
       url: page.url(),
@@ -141,179 +93,136 @@ export class BrowserExecutor {
   }
 
   async elementExists(selector: string): Promise<boolean> {
-    const page = await this.getPage();
-    const normalizedSelector = selector.trim();
+    const page = this.getPage();
 
-    if (!normalizedSelector) {
-      throw new Error("Selector elementExists tidak boleh kosong.");
-    }
-
-    const count = await page.locator(normalizedSelector).count();
-
-    return count > 0;
+    return (await page.locator(selector).count()) > 0;
   }
 
   async click(selector: string): Promise<void> {
-    const page = await this.getPage();
-    const normalizedSelector = selector.trim();
+    const page = this.getPage();
 
-    if (!normalizedSelector) {
-      throw new Error("Selector click tidak boleh kosong.");
-    }
-
-    console.log(`🖱️ [BrowserExecutor] Click: ${normalizedSelector}`);
-
-    await page.locator(normalizedSelector).click();
+    await page.locator(selector).click();
   }
 
   async fill(selector: string, value: string): Promise<void> {
-    const page = await this.getPage();
-    const normalizedSelector = selector.trim();
+    const page = this.getPage();
 
-    if (!normalizedSelector) {
-      throw new Error("Selector fill tidak boleh kosong.");
-    }
-
-    console.log(`⌨️ [BrowserExecutor] Fill: ${normalizedSelector}`);
-
-    await page.locator(normalizedSelector).fill(value);
+    await page.locator(selector).fill(value);
   }
 
   async press(selector: string, key: string): Promise<void> {
-    const page = await this.getPage();
-    const normalizedSelector = selector.trim();
-    const normalizedKey = key.trim();
+    const page = this.getPage();
 
-    if (!normalizedSelector) {
-      throw new Error("Selector press tidak boleh kosong.");
-    }
-
-    if (!normalizedKey) {
-      throw new Error("Key press tidak boleh kosong.");
-    }
-
-    console.log(
-      `⌨️ [BrowserExecutor] Press: ${normalizedSelector} → ${normalizedKey}`,
-    );
-
-    await page.locator(normalizedSelector).press(normalizedKey);
+    await page.locator(selector).press(key);
   }
 
   async getText(selector: string): Promise<string> {
-    const page = await this.getPage();
-    const normalizedSelector = selector.trim();
+    const page = this.getPage();
 
-    if (!normalizedSelector) {
-      throw new Error("Selector getText tidak boleh kosong.");
-    }
-
-    return page.locator(normalizedSelector).innerText();
+    return await page.locator(selector).innerText();
   }
 
   async getAttribute(
     selector: string,
     attribute: string,
   ): Promise<string | null> {
-    const page = await this.getPage();
-    const normalizedSelector = selector.trim();
-    const normalizedAttribute = attribute.trim();
+    const page = this.getPage();
 
-    if (!normalizedSelector) {
-      throw new Error("Selector getAttribute tidak boleh kosong.");
-    }
-
-    if (!normalizedAttribute) {
-      throw new Error("Nama attribute tidak boleh kosong.");
-    }
-
-    return page.locator(normalizedSelector).getAttribute(normalizedAttribute);
+    return await page.locator(selector).getAttribute(attribute);
   }
 
-  async evaluate<T>(script: string): Promise<T> {
-    const page = await this.getPage();
-    const normalizedScript = script.trim();
+  async evaluate<T = unknown>(script: string): Promise<T> {
+    const page = this.getPage();
 
-    if (!normalizedScript) {
-      throw new Error("Script evaluate tidak boleh kosong.");
-    }
-
-    return page.evaluate(normalizedScript) as Promise<T>;
+    return (await page.evaluate(script)) as T;
   }
 
-  getCurrentUrl(): string {
-    if (!this.page) {
-      throw new Error(
-        "Browser belum dimulai. Panggil start() terlebih dahulu.",
-      );
-    }
-
-    return this.page.url();
+  async getCurrentUrl(): Promise<string> {
+    return this.getPage().url();
   }
 
-  async saveStorageState(outputPath?: string): Promise<string> {
-    const context = await this.getContext();
-    const targetPath = outputPath?.trim() || this.storageStatePath;
-
-    if (!targetPath) {
-      throw new Error("Path storage state wajib diisi.");
+  async saveStorageState(path?: string): Promise<string> {
+    if (!this.context) {
+      throw new Error("Browser belum di-start.");
     }
 
-    await context.storageState({
-      path: targetPath,
+    const sessionPath = path ?? this.options.storageStatePath;
+
+    if (!sessionPath) {
+      throw new Error("Storage state path belum ditentukan.");
+    }
+
+    await this.context.storageState({
+      path: sessionPath,
     });
 
-    console.log(`🔐 [BrowserExecutor] Storage state saved: ${targetPath}`);
-
-    return targetPath;
+    return sessionPath;
   }
 
   async screenshot(path: string): Promise<void> {
-    const page = await this.getPage();
-    const normalizedPath = path.trim();
-
-    if (!normalizedPath) {
-      throw new Error("Path screenshot tidak boleh kosong.");
-    }
+    const page = this.getPage();
 
     await page.screenshot({
-      path: normalizedPath,
+      path,
       fullPage: true,
     });
+  }
 
-    console.log(`📸 [BrowserExecutor] Screenshot saved: ${normalizedPath}`);
+  getOpenPages(): Page[] {
+    if (!this.context) {
+      throw new Error("Browser belum di-start.");
+    }
+
+    return this.context.pages();
+  }
+
+  async waitForNewPage(timeoutMs?: number): Promise<Page | null> {
+    if (!this.context) {
+      throw new Error("Browser belum di-start.");
+    }
+
+    try {
+      return await this.context.waitForEvent("page", {
+        timeout: timeoutMs ?? this.options.timeoutMs ?? 10000,
+      });
+    } catch (error) {
+      if (error instanceof Error && /Timeout/i.test(error.message)) {
+        return null;
+      }
+
+      throw error;
+    }
+  }
+
+  usePage(page: Page): void {
+    if (!this.context) {
+      throw new Error("Browser belum di-start.");
+    }
+
+    if (!this.context.pages().includes(page)) {
+      throw new Error("Page bukan bagian dari browser context ini.");
+    }
+
+    this.page = page;
+  }
+
+  getActivePage(): Page {
+    return this.getPage();
   }
 
   async close(): Promise<void> {
-    if (this.browser) {
-      console.log("🌐 [BrowserExecutor] Closing browser...");
-
-      await this.browser.close();
-
-      this.browser = null;
-      this.context = null;
-      this.page = null;
+    if (this.context) {
+      await this.context.close();
     }
+
+    this.context = null;
+    this.page = null;
+    this.browser = null;
   }
 
-  private async getContext(): Promise<BrowserContext> {
-    if (!this.context) {
-      await this.start();
-    }
-
-    if (!this.context) {
-      throw new Error("Browser context gagal dibuat.");
-    }
-
-    return this.context;
-  }
-
-  private async getPage(): Promise<Page> {
+  private getPage(): Page {
     if (!this.page) {
-      await this.start();
-    }
-
-    if (!this.page) {
-      throw new Error("Browser page gagal dibuat.");
+      throw new Error("Browser belum di-start.");
     }
 
     return this.page;
