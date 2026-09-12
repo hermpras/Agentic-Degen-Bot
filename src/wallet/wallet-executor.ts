@@ -13,6 +13,14 @@ export interface WalletConnectionResult {
   message: string;
 }
 
+export interface WalletVerificationResult {
+  success: boolean;
+  matchesExpected: boolean;
+  expectedWalletAddress: string | null;
+  detectedWalletAddress: string | null;
+  message: string;
+}
+
 export class WalletExecutor {
   constructor(private readonly browser: BrowserExecutor) {}
 
@@ -33,22 +41,14 @@ export class WalletExecutor {
     const normalizedPageText = page.text.toLowerCase();
     const normalizedWallet = context.walletAddress.toLowerCase();
 
-    /*
-     * Generic verification:
-     *
-     * Kita belum menganggap wallet connected hanya karena
-     * tombol "Connect Wallet" hilang.
-     *
-     * Yang kita cari adalah evidence bahwa website benar-benar
-     * menampilkan / mengenali wallet address milik account.
-     */
-    const shortWallet = normalizedWallet.slice(0, 6);
+    const fullWalletVisible = normalizedPageText.includes(normalizedWallet);
 
-    const walletVisible =
-      normalizedPageText.includes(normalizedWallet) ||
-      normalizedPageText.includes(shortWallet);
+    const shortenedWalletVisible = this.matchesShortWallet(
+      normalizedPageText,
+      normalizedWallet,
+    );
 
-    if (walletVisible) {
+    if (fullWalletVisible || shortenedWalletVisible) {
       return {
         success: true,
         connected: true,
@@ -77,5 +77,97 @@ export class WalletExecutor {
       message:
         "Belum ditemukan evidence yang cukup untuk memastikan wallet terhubung.",
     };
+  }
+
+  async verifyActiveWallet(
+    context: WalletExecutionContext,
+  ): Promise<WalletVerificationResult> {
+    if (!context.walletAddress) {
+      return {
+        success: false,
+        matchesExpected: false,
+        expectedWalletAddress: null,
+        detectedWalletAddress: null,
+        message: `Account "${context.accountName}" belum memiliki wallet address.`,
+      };
+    }
+
+    const page = await this.browser.getPageResult();
+
+    const expected = context.walletAddress.toLowerCase();
+
+    const detected = this.extractWalletAddress(page.text, expected);
+
+    if (!detected) {
+      return {
+        success: false,
+        matchesExpected: false,
+        expectedWalletAddress: context.walletAddress,
+        detectedWalletAddress: null,
+        message:
+          "Tidak ditemukan wallet address yang dapat diverifikasi dari Rabby.",
+      };
+    }
+
+    const matchesExpected =
+      detected.toLowerCase() === expected ||
+      this.matchesShortWallet(detected.toLowerCase(), expected);
+
+    if (!matchesExpected) {
+      return {
+        success: false,
+        matchesExpected: false,
+        expectedWalletAddress: context.walletAddress,
+        detectedWalletAddress: detected,
+        message: "Wallet aktif di Rabby berbeda dengan wallet Account.",
+      };
+    }
+
+    return {
+      success: true,
+      matchesExpected: true,
+      expectedWalletAddress: context.walletAddress,
+      detectedWalletAddress: detected,
+      message: "Wallet aktif di Rabby cocok dengan wallet Account.",
+    };
+  }
+
+  private extractWalletAddress(
+    text: string,
+    expectedWallet: string,
+  ): string | null {
+    const fullMatch = text.match(/0x[a-fA-F0-9]{40}/);
+
+    if (fullMatch) {
+      return fullMatch[0];
+    }
+
+    const expectedShort = this.getShortWallet(expectedWallet);
+
+    const escapedShort = this.escapeRegExp(expectedShort);
+
+    const shortMatch = text.match(new RegExp(escapedShort, "i"));
+
+    if (shortMatch) {
+      return expectedShort;
+    }
+
+    return null;
+  }
+
+  private matchesShortWallet(text: string, walletAddress: string): boolean {
+    const shortWallet = this.getShortWallet(walletAddress);
+
+    return text.includes(shortWallet);
+  }
+
+  private getShortWallet(walletAddress: string): string {
+    const normalized = walletAddress.toLowerCase();
+
+    return normalized.slice(0, 8) + "..." + normalized.slice(-6);
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 }
