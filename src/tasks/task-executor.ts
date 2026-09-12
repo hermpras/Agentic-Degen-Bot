@@ -227,7 +227,7 @@ export class TaskExecutor {
     }
 
     return {
-      output: result.output,
+      output: result.output ?? null,
       status: "DONE",
     };
   }
