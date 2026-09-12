@@ -2,6 +2,25 @@ import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 
+export type TaskPlanStatus =
+  | "PLANNED"
+  | "APPROVED"
+  | "EXECUTING"
+  | "COMPLETED"
+  | "FAILED";
+
+export interface StoredTaskPlan {
+  id: number;
+  projectName: string;
+  sourceUrl: string;
+  accountCount: number;
+  taskCount: number;
+  status: TaskPlanStatus;
+  planJson: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export class AgentDatabase {
   private db: Database.Database;
 
@@ -14,6 +33,7 @@ export class AgentDatabase {
     }
 
     this.db = new Database(fullPath);
+
     this.initSchema();
   }
 
@@ -63,7 +83,6 @@ export class AgentDatabase {
         notes TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-
         FOREIGN KEY (project_id)
           REFERENCES projects(id)
           ON DELETE CASCADE
@@ -82,11 +101,9 @@ export class AgentDatabase {
         completed_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-
         FOREIGN KEY (project_id)
           REFERENCES projects(id)
           ON DELETE CASCADE,
-
         FOREIGN KEY (account_id)
           REFERENCES accounts(id)
           ON DELETE CASCADE
@@ -109,11 +126,9 @@ export class AgentDatabase {
         checked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         source TEXT,
         notes TEXT,
-
         FOREIGN KEY (project_id)
           REFERENCES projects(id)
           ON DELETE CASCADE,
-
         FOREIGN KEY (account_id)
           REFERENCES accounts(id)
           ON DELETE CASCADE
@@ -124,6 +139,24 @@ export class AgentDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_eligibility_account_id
       ON eligibility_checks(account_id);
+
+      CREATE TABLE IF NOT EXISTS task_plans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_name TEXT NOT NULL,
+        source_url TEXT NOT NULL,
+        account_count INTEGER NOT NULL,
+        task_count INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PLANNED',
+        plan_json TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_task_plans_project_name
+      ON task_plans(project_name);
+
+      CREATE INDEX IF NOT EXISTS idx_task_plans_status
+      ON task_plans(status);
     `);
 
     this.runMigrations();
@@ -148,6 +181,119 @@ export class AgentDatabase {
         "🗄️ [Database] Migration applied: tasks.target_url ditambahkan.",
       );
     }
+  }
+
+  saveTaskPlan(plan: {
+    projectName: string;
+    sourceUrl: string;
+    accountCount: number;
+    taskCount: number;
+    tasks: unknown[];
+  }): number {
+    const result = this.db
+      .prepare(
+        `
+          INSERT INTO task_plans (
+            project_name,
+            source_url,
+            account_count,
+            task_count,
+            status,
+            plan_json
+          )
+          VALUES (?, ?, ?, ?, 'PLANNED', ?)
+        `,
+      )
+      .run(
+        plan.projectName,
+        plan.sourceUrl,
+        plan.accountCount,
+        plan.taskCount,
+        JSON.stringify(plan),
+      );
+
+    return Number(result.lastInsertRowid);
+  }
+
+  getTaskPlan(planId: number): StoredTaskPlan | null {
+    const row = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            project_name AS projectName,
+            source_url AS sourceUrl,
+            account_count AS accountCount,
+            task_count AS taskCount,
+            status,
+            plan_json AS planJson,
+            created_at AS createdAt,
+            updated_at AS updatedAt
+          FROM task_plans
+          WHERE id = ?
+          LIMIT 1
+        `,
+      )
+      .get(planId) as StoredTaskPlan | undefined;
+
+    return row ?? null;
+  }
+
+  updateTaskPlanStatus(planId: number, status: TaskPlanStatus): boolean {
+    const result = this.db
+      .prepare(
+        `
+          UPDATE task_plans
+          SET
+            status = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `,
+      )
+      .run(status, planId);
+
+    return result.changes > 0;
+  }
+
+  listTaskPlans(options?: {
+    projectName?: string;
+    status?: TaskPlanStatus;
+  }): StoredTaskPlan[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (options?.projectName) {
+      conditions.push("project_name = ?");
+      params.push(options.projectName.trim());
+    }
+
+    if (options?.status) {
+      conditions.push("status = ?");
+      params.push(options.status);
+    }
+
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    return this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            project_name AS projectName,
+            source_url AS sourceUrl,
+            account_count AS accountCount,
+            task_count AS taskCount,
+            status,
+            plan_json AS planJson,
+            created_at AS createdAt,
+            updated_at AS updatedAt
+          FROM task_plans
+          ${whereClause}
+          ORDER BY id DESC
+        `,
+      )
+      .all(...params) as StoredTaskPlan[];
   }
 
   getDb(): Database.Database {

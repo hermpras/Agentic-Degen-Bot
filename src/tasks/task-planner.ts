@@ -13,6 +13,7 @@ export type PlannedTaskType =
   | "FORM_TWITTER"
   | "FORM_WALLET"
   | "FORM_SUBMIT"
+  | "CONNECT_WALLET"
   | "WHITELIST"
   | "CUSTOM";
 
@@ -139,7 +140,6 @@ export class TaskPlanner {
 
   createPlan(input: TaskPlannerInput): TaskPlan {
     const projectName = input.projectName.trim();
-
     const sourceUrl = input.sourceUrl.trim();
 
     if (!projectName) {
@@ -178,8 +178,6 @@ export class TaskPlanner {
       ) {
         const requirement = input.requirements[requirementIndex];
 
-        const planTaskId = `account-${account.id}-task-${requirementIndex + 1}`;
-
         const previousTaskId =
           accountTaskIds.length > 0
             ? accountTaskIds[accountTaskIds.length - 1]
@@ -189,6 +187,46 @@ export class TaskPlanner {
 
         if (previousTaskId) {
           dependsOn.push(previousTaskId);
+        }
+
+        /*
+         * Wallet connection is an execution capability.
+         *
+         * The project analyzer does not need to know about Rabby.
+         * When a task requires wallet data/interaction, the planner
+         * inserts CONNECT_WALLET immediately before that task.
+         */
+        if (this.requiresWalletConnection(requirement)) {
+          const connectTaskId = `account-${account.id}-wallet-${requirementIndex + 1}`;
+
+          const connectDependsOn = previousTaskId ? [previousTaskId] : [];
+
+          const connectTask: PlannedTask = {
+            planTaskId: connectTaskId,
+            projectName,
+            accountId: account.id,
+            accountName: account.name,
+            twitterHandle: account.twitter_handle,
+            walletAddress: account.wallet_address,
+            taskType: "CONNECT_WALLET",
+            targetUrl:
+              requirement.targetUrl?.trim() ||
+              requirement.form?.targetUrl?.trim() ||
+              null,
+            description:
+              `Connect and verify wallet for account "${account.name}" ` +
+              `before executing: ${requirement.description.trim()}`,
+            dependsOn: connectDependsOn,
+            outputKey: null,
+            inputFrom: null,
+            form: null,
+          };
+
+          tasks.push(connectTask);
+          accountTaskIds.push(connectTaskId);
+
+          dependsOn.length = 0;
+          dependsOn.push(connectTaskId);
         }
 
         let inputFrom: string | null = null;
@@ -213,8 +251,10 @@ export class TaskPlanner {
           ? `account_${account.id}_own_tweet_url`
           : null;
 
+        const plannedTaskId = `account-${account.id}-task-${requirementIndex + 1}`;
+
         const plannedTask: PlannedTask = {
-          planTaskId,
+          planTaskId: plannedTaskId,
           projectName,
           accountId: account.id,
           accountName: account.name,
@@ -232,7 +272,7 @@ export class TaskPlanner {
         };
 
         tasks.push(plannedTask);
-        accountTaskIds.push(planTaskId);
+        accountTaskIds.push(plannedTaskId);
       }
     }
 
@@ -243,6 +283,30 @@ export class TaskPlanner {
       taskCount: tasks.length,
       tasks,
     };
+  }
+
+  private requiresWalletConnection(requirement: TaskRequirement): boolean {
+    if (requirement.type === "FORM_WALLET") {
+      return true;
+    }
+
+    if (requirement.type === "FORM_SUBMIT") {
+      return this.formContainsWalletField(requirement.form);
+    }
+
+    if (requirement.form && this.formContainsWalletField(requirement.form)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private formContainsWalletField(form: FormRequirement | undefined): boolean {
+    if (!form?.fields) {
+      return false;
+    }
+
+    return form.fields.some((field) => field.type === "WALLET_ADDRESS");
   }
 
   private buildPlannedForm(

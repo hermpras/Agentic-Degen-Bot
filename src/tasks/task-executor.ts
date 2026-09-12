@@ -2,6 +2,10 @@ import { AgentDatabase } from "../database/agent-database.js";
 import { BrowserExecutor } from "../browser/browser-executor.js";
 import { TaskManager, TaskStatus } from "./task-manager.js";
 import { FormExecutor } from "./form-executor.js";
+import {
+  WalletFormExecutor,
+  type WalletFormExecutionResult,
+} from "./wallet-form-executor.js";
 import { XActionExecutor, type XActionResult } from "./x-action-executor.js";
 import {
   AdaptiveWebExecutor,
@@ -49,7 +53,6 @@ export class TaskExecutor {
     this.taskManager = new TaskManager(database);
     this.xActionExecutor = xActionExecutor ?? new XActionExecutor();
     this.formExecutor = formExecutor;
-
     this.adaptiveWebExecutor =
       adaptiveWebExecutor ?? this.createDefaultAdaptiveWebExecutor();
   }
@@ -143,6 +146,7 @@ export class TaskExecutor {
         this.taskManager.markTaskFailed(databaseTaskId, errorMessage);
 
         console.error(`❌ [TaskExecutor] Task FAILED: ${task.planTaskId}`);
+
         console.error(errorMessage);
 
         return {
@@ -178,6 +182,7 @@ export class TaskExecutor {
       const message = error instanceof Error ? error.message : String(error);
 
       console.error(`❌ [TaskExecutor] Task FAILED: ${task.planTaskId}`);
+
       console.error(message);
 
       if (databaseTaskId !== null) {
@@ -211,9 +216,11 @@ export class TaskExecutor {
 
       case "FORM":
       case "FORM_TWITTER":
-      case "FORM_WALLET":
       case "FORM_SUBMIT":
         return this.executeFormTask(task, databaseTaskId);
+
+      case "FORM_WALLET":
+        return this.executeWalletFormTask(task, databaseTaskId);
 
       case "WHITELIST":
         return this.executeWhitelistTask(task, databaseTaskId);
@@ -327,6 +334,69 @@ export class TaskExecutor {
     }
   }
 
+  private async executeWalletFormTask(
+    task: PlannedTask,
+    databaseTaskId: number,
+  ): Promise<TaskActionResult> {
+    if (!task.form) {
+      throw new Error(
+        `Task ${task.planTaskId} adalah FORM_WALLET tetapi konfigurasi form tidak tersedia.`,
+      );
+    }
+
+    if (!task.form.targetUrl) {
+      throw new Error(
+        `Task ${task.planTaskId} membutuhkan target URL wallet form.`,
+      );
+    }
+
+    const account = this.getAccountContext(task.accountId);
+
+    if (!account.walletAddress) {
+      throw new Error(
+        `Account "${account.accountName}" belum memiliki wallet address.`,
+      );
+    }
+
+    console.log(`🔐 [TaskExecutor] FORM_WALLET → ${task.form.targetUrl}`);
+
+    console.log(
+      `👤 [TaskExecutor] Wallet account → ${account.accountName} / ${account.walletAddress}`,
+    );
+
+    const walletCdpUrl = process.env.WALLET_CDP_URL ?? "http://127.0.0.1:9223";
+
+    const browser = new BrowserExecutor({
+      headless: false,
+      timeoutMs: 30000,
+      connectOverCDPUrl: walletCdpUrl,
+    });
+
+    try {
+      await browser.start();
+
+      const walletFormExecutor = new WalletFormExecutor(browser);
+
+      await browser.open(task.form.targetUrl);
+
+      const form = await walletFormExecutor.inspect();
+
+      const detection = walletFormExecutor.detectWalletRequirement(form);
+
+      console.log(`🔎 [TaskExecutor] Wallet form mode → ${detection.mode}`);
+
+      const result = await walletFormExecutor.execute({
+        accountId: account.accountId,
+        accountName: account.accountName,
+        walletAddress: account.walletAddress,
+      });
+
+      return this.handleWalletFormExecutionResult(task, databaseTaskId, result);
+    } finally {
+      await browser.close();
+    }
+  }
+
   private handleFormExecutionResult(
     task: PlannedTask,
     databaseTaskId: number,
@@ -396,6 +466,55 @@ export class TaskExecutor {
           `Execution proof status "${formResult.proof.executionStatus}" tidak dikenali.`,
         );
     }
+  }
+
+  private handleWalletFormExecutionResult(
+    task: PlannedTask,
+    databaseTaskId: number,
+    result: WalletFormExecutionResult,
+  ): TaskActionResult {
+    const output = JSON.stringify(
+      {
+        action: "FORM_WALLET",
+        taskId: databaseTaskId,
+        projectName: task.projectName,
+        accountName: task.accountName,
+        targetUrl: task.form?.targetUrl ?? null,
+        mode: result.mode,
+        success: result.success,
+        connected: result.connected,
+        walletAddressFilled: result.walletAddressFilled,
+        walletVerification: result.walletVerification,
+        rabbyConnection: result.rabbyConnection,
+        message: result.message,
+      },
+      null,
+      2,
+    );
+
+    this.taskManager.saveTaskProof(databaseTaskId, output);
+
+    console.log(
+      `💾 [TaskExecutor] Wallet form proof tersimpan untuk task #${databaseTaskId}.`,
+    );
+
+    if (result.success) {
+      console.log(`✅ [TaskExecutor] Wallet form berhasil: ${task.planTaskId}`);
+
+      return {
+        output,
+        status: "DONE",
+      };
+    }
+
+    console.log(
+      `⏸️ [TaskExecutor] Wallet form belum selesai: ${task.planTaskId}`,
+    );
+
+    return {
+      output,
+      status: "IN_PROGRESS",
+    };
   }
 
   private async executeWhitelistTask(
@@ -469,13 +588,6 @@ export class TaskExecutor {
       2,
     );
 
-    if (!result.success) {
-      return {
-        output,
-        status: "FAILED",
-      };
-    }
-
     if (result.status === "BLOCKED") {
       return {
         output,
@@ -483,7 +595,7 @@ export class TaskExecutor {
       };
     }
 
-    if (result.status === "FAILED") {
+    if (!result.success || result.status === "FAILED") {
       return {
         output,
         status: "FAILED",
@@ -541,7 +653,7 @@ export class TaskExecutor {
 
   private getAccountContext(
     accountId: number,
-  ): AdaptiveWebExecutionContext["account"] {
+  ): NonNullable<AdaptiveWebExecutionContext["account"]> {
     const account = this.database
       .getDb()
       .prepare(
@@ -581,13 +693,15 @@ export class TaskExecutor {
   }
 
   private createDatabaseTask(task: PlannedTask): number {
-    const projectStmt = this.database.getDb().prepare(`
+    const projectStmt = this.database.getDb().prepare(
+      `
     SELECT id
     FROM projects
     WHERE name = ?
     ORDER BY id ASC
     LIMIT 1
-  `);
+  `,
+    );
 
     const project = projectStmt.get(task.projectName) as
       | {
@@ -601,7 +715,8 @@ export class TaskExecutor {
       );
     }
 
-    const stmt = this.database.getDb().prepare(`
+    const stmt = this.database.getDb().prepare(
+      `
     INSERT INTO tasks (
       project_id,
       account_id,
@@ -611,7 +726,8 @@ export class TaskExecutor {
       status
     )
     VALUES (?, ?, ?, ?, ?, 'PENDING')
-  `);
+  `,
+    );
 
     const result = stmt.run(
       project.id,

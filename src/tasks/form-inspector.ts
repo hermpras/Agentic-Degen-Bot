@@ -25,11 +25,21 @@ export interface InspectedCheckbox {
   selector: string;
 }
 
+export interface InspectedInteractive {
+  index: number;
+  kind: "BUTTON" | "LINK" | "ROLE_BUTTON";
+  text: string | null;
+  ariaLabel: string | null;
+  title: string | null;
+  selector: string;
+}
+
 export interface InspectedForm {
   url: string;
   title: string;
   fields: InspectedField[];
   checkboxes: InspectedCheckbox[];
+  interactives: InspectedInteractive[];
   summary: string;
 }
 
@@ -41,11 +51,18 @@ export class FormInspector {
 
     const fields = await this.inspectFields();
     const checkboxes = await this.inspectCheckboxes();
+    const interactives = await this.inspectInteractives();
 
-    const summary = this.buildSummary(page.title, page.url, fields, checkboxes);
+    const summary = this.buildSummary(
+      page.title,
+      page.url,
+      fields,
+      checkboxes,
+      interactives,
+    );
 
     console.log(
-      `🔎 [FormInspector] Inspected ${fields.length} fields, ${checkboxes.length} checkboxes.`,
+      `🔎 [FormInspector] Inspected ${fields.length} fields, ${checkboxes.length} checkboxes, ${interactives.length} interactive elements.`,
     );
 
     return {
@@ -53,6 +70,7 @@ export class FormInspector {
       title: page.title,
       fields,
       checkboxes,
+      interactives,
       summary,
     };
   }
@@ -241,6 +259,67 @@ export class FormInspector {
     }));
   }
 
+  private async inspectInteractives(): Promise<InspectedInteractive[]> {
+    const script = `
+      (() => {
+        const elements = Array.from(
+          document.querySelectorAll(
+            'button, a, [role="button"]'
+          )
+        );
+
+        return elements.map((element, index) => {
+          const htmlElement = element;
+
+          const tagName =
+            htmlElement.tagName.toLowerCase();
+
+          let kind = "BUTTON";
+
+          if (tagName === "a") {
+            kind = "LINK";
+          } else if (
+            htmlElement.getAttribute("role") === "button"
+          ) {
+            kind = "ROLE_BUTTON";
+          }
+
+          const text =
+            htmlElement.textContent?.trim() || null;
+
+          const ariaLabel =
+            htmlElement.getAttribute("aria-label");
+
+          const title =
+            htmlElement.getAttribute("title");
+
+          return {
+            index,
+            kind,
+            text,
+            ariaLabel,
+            title,
+          };
+        });
+      })()
+    `;
+
+    const rawInteractives = await this.browser.evaluate(script);
+
+    if (!Array.isArray(rawInteractives)) {
+      throw new Error("FormInspector gagal membaca interactive elements.");
+    }
+
+    return rawInteractives.map((element) => ({
+      index: element.index,
+      kind: element.kind,
+      text: element.text,
+      ariaLabel: element.ariaLabel,
+      title: element.title,
+      selector: this.buildInteractiveSelector(element),
+    }));
+  }
+
   private buildSelector(
     element: {
       id: string | null;
@@ -286,17 +365,36 @@ export class FormInspector {
     return `input, textarea, select:nth-of-type(${element.index + 1})`;
   }
 
+  private buildInteractiveSelector(element: {
+    text: string | null;
+    ariaLabel: string | null;
+    title: string | null;
+    index: number;
+  }): string {
+    if (element.ariaLabel) {
+      return `[aria-label="${this.escapeAttribute(element.ariaLabel)}"]`;
+    }
+
+    if (element.title) {
+      return `[title="${this.escapeAttribute(element.title)}"]`;
+    }
+
+    return `button, a, [role="button"]:nth-of-type(${element.index + 1})`;
+  }
+
   private buildSummary(
     title: string,
     url: string,
     fields: InspectedField[],
     checkboxes: InspectedCheckbox[],
+    interactives: InspectedInteractive[],
   ): string {
     const lines: string[] = [];
 
     lines.push(`Title: ${title}`);
     lines.push(`URL: ${url}`);
     lines.push("");
+
     lines.push(`Fields: ${fields.length}`);
 
     for (const field of fields) {
@@ -315,6 +413,7 @@ export class FormInspector {
     }
 
     lines.push("");
+
     lines.push(`Checkboxes: ${checkboxes.length}`);
 
     for (const checkbox of checkboxes) {
@@ -324,6 +423,26 @@ export class FormInspector {
           checkbox.label ? `label="${checkbox.label}"` : null,
           checkbox.name ? `name="${checkbox.name}"` : null,
           checkbox.checked ? "checked" : "unchecked",
+        ]
+          .filter(Boolean)
+          .join(" | "),
+      );
+    }
+
+    lines.push("");
+
+    lines.push(`Interactive elements: ${interactives.length}`);
+
+    for (const interactive of interactives) {
+      lines.push(
+        [
+          `#${interactive.index}`,
+          interactive.kind,
+          interactive.text ? `text="${interactive.text}"` : null,
+          interactive.ariaLabel
+            ? `aria-label="${interactive.ariaLabel}"`
+            : null,
+          interactive.title ? `title="${interactive.title}"` : null,
         ]
           .filter(Boolean)
           .join(" | "),
