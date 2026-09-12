@@ -1,6 +1,5 @@
 import { LLMProvider } from "../providers/llm.interface";
 import { BrowserExecutor } from "../browser/browser-executor";
-import { Account } from "../accounts/account-manager";
 
 export type AdaptiveActionType =
   | "WAIT"
@@ -91,7 +90,6 @@ export class AdaptiveWebExecutor {
   ) {
     this.llm = llm;
     this.browser = browser;
-
     this.options = {
       maxSteps: options.maxSteps ?? 12,
       maxInitialWaits: options.maxInitialWaits ?? 3,
@@ -111,20 +109,23 @@ export class AdaptiveWebExecutor {
     await this.browser.open(url);
 
     const startedUrl = await this.browser.getCurrentUrl();
-
     const steps: AdaptiveStepProof[] = [];
 
     let finalState = await this.inspectCurrentPage();
-
     let initialWaits = 0;
+
+    let previousAction: AdaptiveAction | null = null;
+    let previousStateBeforeAction: AdaptivePageState | null = null;
 
     for (let step = 1; step <= this.options.maxSteps; step++) {
       console.log(
         `\n🧠 [AdaptiveWebExecutor] Step ${step}/${this.options.maxSteps}`,
       );
+
       console.log(
         `🌐 [AdaptiveWebExecutor] ${finalState.title} → ${finalState.url}`,
       );
+
       console.log(
         `🔎 [AdaptiveWebExecutor] Interactive elements: ${finalState.interactiveElements.length}`,
       );
@@ -132,7 +133,7 @@ export class AdaptiveWebExecutor {
       /*
        * Some modern sites render their actual controls asynchronously.
        * Give the page a few chances before asking the LLM to reason about
-       * a page that may still be incomplete.
+       * an incomplete page.
        */
       if (
         finalState.interactiveElements.length === 0 &&
@@ -167,12 +168,21 @@ export class AdaptiveWebExecutor {
           pageTextAfter: finalState.text,
         });
 
+        previousAction = waitAction;
+        previousStateBeforeAction = null;
+
         continue;
       }
 
       initialWaits = this.options.maxInitialWaits;
 
-      const decision = await this.decideNextAction(finalState, goal, context);
+      const decision = await this.decideNextAction(
+        finalState,
+        goal,
+        context,
+        previousAction,
+        previousStateBeforeAction,
+      );
 
       console.log(
         `🧭 [AdaptiveWebExecutor] Decision: ${JSON.stringify(decision)}`,
@@ -186,7 +196,7 @@ export class AdaptiveWebExecutor {
         steps.push({
           step,
           action: decision,
-          urlBefore,
+          urlBefore: finalState.url,
           urlAfter: finalState.url,
           pageTitleAfter: finalState.title,
           pageTextAfter: finalState.text,
@@ -253,8 +263,13 @@ export class AdaptiveWebExecutor {
         };
       }
 
-      await this.executeAction(decision);
+      /*
+       * Keep the state before executing the action.
+       * This lets the next LLM decision understand what just happened.
+       */
+      const stateBeforeAction = finalState;
 
+      await this.executeAction(decision);
       await this.sleep(this.options.waitAfterActionMs);
 
       finalState = await this.inspectCurrentPage();
@@ -267,6 +282,9 @@ export class AdaptiveWebExecutor {
         pageTitleAfter: finalState.title,
         pageTextAfter: finalState.text,
       });
+
+      previousAction = decision;
+      previousStateBeforeAction = stateBeforeAction;
     }
 
     return {
@@ -297,7 +315,6 @@ export class AdaptiveWebExecutor {
 
   private async inspectCurrentPage(): Promise<AdaptivePageState> {
     const page = await this.browser.getPageResult();
-
     const interactiveElements = await this.collectInteractiveElements();
 
     return {
@@ -314,17 +331,26 @@ export class AdaptiveWebExecutor {
         const results = [];
 
         const escapeCss = (value) => {
-          if (window.CSS && typeof window.CSS.escape === "function") {
+          if (
+            window.CSS &&
+            typeof window.CSS.escape === "function"
+          ) {
             return window.CSS.escape(value);
           }
 
-          return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\\\$&");
+          return String(value).replace(
+            /[^a-zA-Z0-9_-]/g,
+            "\\\\$&"
+          );
         };
 
         const selectorIsUnique = (selector, element) => {
           try {
             const matches = document.querySelectorAll(selector);
-            return matches.length === 1 && matches[0] === element;
+            return (
+              matches.length === 1 &&
+              matches[0] === element
+            );
           } catch {
             return false;
           }
@@ -344,9 +370,15 @@ export class AdaptiveWebExecutor {
             let part = current.tagName.toLowerCase();
 
             if (current.id) {
-              const idSelector = "#" + escapeCss(current.id);
+              const idSelector =
+                "#" + escapeCss(current.id);
 
-              if (selectorIsUnique(idSelector, current)) {
+              if (
+                selectorIsUnique(
+                  idSelector,
+                  current
+                )
+              ) {
                 return idSelector;
               }
             }
@@ -354,21 +386,35 @@ export class AdaptiveWebExecutor {
             const parent = current.parentElement;
 
             if (parent) {
-              const siblings = Array.from(parent.children).filter(
-                (child) => child.tagName === current.tagName,
+              const siblings = Array.from(
+                parent.children
+              ).filter(
+                (child) =>
+                  child.tagName === current.tagName
               );
 
               if (siblings.length > 1) {
-                const index = siblings.indexOf(current) + 1;
-                part += ":nth-of-type(" + index + ")";
+                const index =
+                  siblings.indexOf(current) + 1;
+
+                part +=
+                  ":nth-of-type(" +
+                  index +
+                  ")";
               }
             }
 
             parts.unshift(part);
 
-            const candidate = parts.join(" > ");
+            const candidate =
+              parts.join(" > ");
 
-            if (selectorIsUnique(candidate, element)) {
+            if (
+              selectorIsUnique(
+                candidate,
+                element
+              )
+            ) {
               return candidate;
             }
 
@@ -383,7 +429,9 @@ export class AdaptiveWebExecutor {
           const candidates = [];
 
           if (element.id) {
-            candidates.push("#" + escapeCss(element.id));
+            candidates.push(
+              "#" + escapeCss(element.id)
+            );
           }
 
           for (const attr of [
@@ -393,30 +441,42 @@ export class AdaptiveWebExecutor {
             "aria-label",
             "placeholder",
           ]) {
-            const value = element.getAttribute(attr);
+            const value =
+              element.getAttribute(attr);
 
             if (value) {
+              const escapedValue =
+                String(value).replace(
+                  /"/g,
+                  '\\\\"'
+                );
+
               candidates.push(
                 element.tagName.toLowerCase() +
                   "[" +
                   attr +
                   '="' +
-                  String(value).replace(/"/g, '\\"') +
-                  '"]',
+                  escapedValue +
+                  '"]'
               );
 
               candidates.push(
                 "[" +
                   attr +
                   '="' +
-                  String(value).replace(/"/g, '\\"') +
-                  '"]',
+                  escapedValue +
+                  '"]'
               );
             }
           }
 
           for (const candidate of candidates) {
-            if (selectorIsUnique(candidate, element)) {
+            if (
+              selectorIsUnique(
+                candidate,
+                element
+              )
+            ) {
               return candidate;
             }
           }
@@ -425,8 +485,11 @@ export class AdaptiveWebExecutor {
         };
 
         const isVisible = (element) => {
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
+          const style =
+            window.getComputedStyle(element);
+
+          const rect =
+            element.getBoundingClientRect();
 
           return (
             style.display !== "none" &&
@@ -438,29 +501,44 @@ export class AdaptiveWebExecutor {
         };
 
         const addElement = (element) => {
-          if (!element || !isVisible(element)) {
+          if (
+            !element ||
+            !isVisible(element)
+          ) {
             return;
           }
 
-          const tag = element.tagName.toLowerCase();
+          const tag =
+            element.tagName.toLowerCase();
 
           const isInteractive =
-            ["button", "input", "textarea", "select", "a"].includes(tag) ||
-            element.getAttribute("role") === "button" ||
-            element.getAttribute("contenteditable") === "true";
+            [
+              "button",
+              "input",
+              "textarea",
+              "select",
+              "a",
+            ].includes(tag) ||
+            element.getAttribute("role") ===
+              "button" ||
+            element.getAttribute(
+              "contenteditable"
+            ) === "true";
 
           if (!isInteractive) {
             return;
           }
 
-          const selector = getUniqueSelector(element);
+          const selector =
+            getUniqueSelector(element);
 
           if (!selector) {
             return;
           }
 
           const existing = results.find(
-            (item) => item.selector === selector,
+            (item) =>
+              item.selector === selector
           );
 
           if (existing) {
@@ -470,20 +548,38 @@ export class AdaptiveWebExecutor {
           results.push({
             selector,
             tag,
-            type: element.getAttribute("type"),
-            text: (element.innerText || element.textContent || "")
+            type:
+              element.getAttribute("type"),
+            text: (
+              element.innerText ||
+              element.textContent ||
+              ""
+            )
               .trim()
               .slice(0, 300),
-            ariaLabel: element.getAttribute("aria-label"),
-            placeholder: element.getAttribute("placeholder"),
-            name: element.getAttribute("name"),
+            ariaLabel:
+              element.getAttribute(
+                "aria-label"
+              ),
+            placeholder:
+              element.getAttribute(
+                "placeholder"
+              ),
+            name:
+              element.getAttribute("name"),
             value:
               "value" in element
-                ? String(element.value || "")
+                ? String(
+                    element.value || ""
+                  )
                 : null,
             disabled:
-              element.hasAttribute("disabled") ||
-              element.getAttribute("aria-disabled") === "true",
+              element.hasAttribute(
+                "disabled"
+              ) ||
+              element.getAttribute(
+                "aria-disabled"
+              ) === "true",
           });
         };
 
@@ -493,7 +589,9 @@ export class AdaptiveWebExecutor {
           }
 
           if (root.querySelectorAll) {
-            for (const element of root.querySelectorAll("*")) {
+            for (const element of root.querySelectorAll(
+              "*"
+            )) {
               addElement(element);
 
               if (element.shadowRoot) {
@@ -522,6 +620,8 @@ export class AdaptiveWebExecutor {
     state: AdaptivePageState,
     goal: string,
     context: AdaptiveWebExecutionContext,
+    previousAction: AdaptiveAction | null,
+    previousStateBeforeAction: AdaptivePageState | null,
   ): Promise<AdaptiveAction> {
     const account = context.account;
 
@@ -534,18 +634,36 @@ export class AdaptiveWebExecutor {
         }
       : null;
 
+    const previousActionContext =
+      previousAction && previousStateBeforeAction
+        ? {
+            action: previousAction,
+            stateBeforeAction: {
+              url: previousStateBeforeAction.url,
+              title: previousStateBeforeAction.title,
+              text: previousStateBeforeAction.text.slice(0, 8000),
+            },
+            importantInstruction:
+              "The current page is the result of this previous action. Determine whether that action already completed the goal before performing another action.",
+          }
+        : null;
+
     const prompt = `
 You are an adaptive web task executor.
 
-Your job is to determine the SINGLE safest next action on the current webpage.
+Your job is to determine the SINGLE safest next action
+on the current webpage.
 
 GOAL:
+
 ${goal}
 
 ACCOUNT CONTEXT:
+
 ${JSON.stringify(accountContext, null, 2)}
 
 CURRENT PAGE:
+
 ${JSON.stringify(
   {
     url: state.url,
@@ -557,9 +675,15 @@ ${JSON.stringify(
 )}
 
 INTERACTIVE ELEMENTS:
+
 ${JSON.stringify(state.interactiveElements, null, 2)}
 
+PREVIOUS ACTION CONTEXT:
+
+${JSON.stringify(previousActionContext, null, 2)}
+
 AVAILABLE ACTIONS:
+
 - WAIT
 - CLICK
 - FILL
@@ -571,33 +695,80 @@ AVAILABLE ACTIONS:
 RULES:
 
 1. Only use selectors from the INTERACTIVE ELEMENTS list.
+
 2. Never invent a selector.
+
 3. Every selector in the list has already been verified as unique.
+
 4. For CLICK, selector must identify the intended visible interactive element.
+
 5. For FILL, selector must identify an input, textarea, or other text-entry element.
+
 6. For FILL, choose the value from ACCOUNT CONTEXT when the page asks for:
    - X/Twitter username → account.twitterHandle
    - wallet address → account.walletAddress
+
 7. Never fabricate account data.
+
 8. Never fabricate wallet addresses.
+
 9. Never fabricate X usernames.
+
 10. Do not expose or request private keys.
+
 11. Do not perform wallet signing.
+
 12. Do not bypass CAPTCHA, anti-bot systems, rate limits, authentication restrictions, or access controls.
+
 13. If authentication/login is required and cannot be safely completed with the available session, return BLOCKED.
+
 14. If wallet connection is required but not currently possible with the available browser capabilities, return BLOCKED.
+
 15. If wallet signing/message signing/transaction signing is requested, return BLOCKED.
+
 16. If a manual approval is clearly required, return BLOCKED.
+
 17. Prefer the minimum number of actions needed to advance the flow.
+
 18. If the page is still rendering, use WAIT.
-19. If the goal has been completed and the page confirms success, use DONE.
-20. If there is no safe next action, use BLOCKED.
-21. Do not guess what a button does when the page text does not provide enough evidence.
-22. Do not use project-specific knowledge or hardcoded project behavior.
+
+19. IMPORTANT: After an action has already been executed, inspect the CURRENT PAGE for its result before repeating that action.
+
+20. If the page displays a clear success, confirmation, eligibility result, completion message, submitted state, or other evidence that the goal has been completed, return DONE.
+
+21. A button remaining visible does NOT mean it must be clicked again.
+
+22. Do NOT repeat the exact same CLICK merely because the same button is still visible.
+
+23. If the previous action changed the page state and the current page already shows the expected result, return DONE.
+
+24. If the previous action did not visibly change the page and another action is genuinely necessary, reason from the current page before continuing.
+
+25. If the goal has been completed and the page confirms success, use DONE.
+
+26. If there is no safe next action, use BLOCKED.
+
+27. Do not guess what a button does when the page text does not provide enough evidence.
+
+28. Do not use project-specific knowledge or hardcoded project behavior.
+
+29. The current page state is more authoritative than assumptions about what should happen next.
 
 IMPORTANT:
+
 The ACCOUNT CONTEXT is authoritative for account identity.
+
 Use it when the page asks for account-specific values.
+
+The PREVIOUS ACTION CONTEXT exists specifically to prevent
+blindly repeating an action that has already produced a result.
+
+Before choosing CLICK, ask:
+
+"Has this action already been performed and has the page
+already shown the expected result?"
+
+If yes, choose DONE instead.
 
 Return ONLY valid JSON:
 
@@ -737,6 +908,7 @@ Return ONLY valid JSON:
         console.log(`🖱️ [AdaptiveWebExecutor] CLICK ${action.selector}`);
 
         await this.browser.click(action.selector);
+
         return;
 
       case "FILL": {
@@ -754,6 +926,7 @@ Return ONLY valid JSON:
         console.log(`⌨️ [AdaptiveWebExecutor] FILL ${selector}`);
 
         await this.browser.fill(selector, value);
+
         return;
       }
 
@@ -771,6 +944,7 @@ Return ONLY valid JSON:
         );
 
         await this.browser.press(action.selector, action.key);
+
         return;
 
       case "OPEN":
@@ -781,9 +955,9 @@ Return ONLY valid JSON:
         console.log(`🌐 [AdaptiveWebExecutor] OPEN ${action.value}`);
 
         await this.browser.open(action.value);
+
         return;
 
-      case "WAIT":
       case "BLOCKED":
       case "DONE":
         return;
