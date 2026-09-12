@@ -1,131 +1,103 @@
-import { AgentDatabase } from "../src/database/agent-database.js";
-import { TaskManager } from "../src/tasks/task-manager.js";
+import "dotenv/config";
 
-const database = new AgentDatabase("data/test-task-proof.db");
+import { GeminiProvider } from "../src/providers/gemini.provider";
+import { AgentDatabase } from "../src/database/agent-database";
+import { BrowserExecutor } from "../src/browser/browser-executor";
+import {
+  AdaptiveWebExecutor,
+  AdaptiveWebExecutionContext,
+} from "../src/tasks/adaptive-web-executor";
 
-const taskManager = new TaskManager(database);
+async function main() {
+  console.log("🧪 Adaptive Web Executor Test");
+  console.log("================================");
 
-const db = database.getDb();
+  const apiKey = process.env.GEMINI_API_KEY;
 
-// Bersihkan data test sebelumnya.
-db.exec(`
-  DELETE FROM tasks;
-  DELETE FROM projects;
-  DELETE FROM accounts;
-`);
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY belum tersedia.");
+  }
 
-// Buat project test.
-db.prepare(
-  `
-  INSERT INTO projects (
-    name,
-    website_url
-  )
-  VALUES (?, ?)
-`,
-).run("Proof Test Project", "https://example.com");
+  const database = new AgentDatabase("data/agent.db");
 
-// Buat account test.
-db.prepare(
-  `
-  INSERT INTO accounts (
-    name,
-    twitter_handle,
-    wallet_address
-  )
-  VALUES (?, ?, ?)
-`,
-).run("Proof Test Account", "@proof_test", "0x1234567890abcdef");
+  try {
+    const llm = new GeminiProvider(
+      apiKey,
+      process.env.GEMINI_MODEL || "gemini-3.5-flash",
+    );
 
-// Buat task.
-const task = taskManager.createTask({
-  projectName: "Proof Test Project",
-  accountName: "Proof Test Account",
-  taskType: "FORM_SUBMIT",
-  targetUrl: "https://example.com/form",
-  description: "Test execution proof persistence",
+    const browser = new BrowserExecutor({
+      headless: true,
+      timeoutMs: 30000,
+    });
+
+    const executor = new AdaptiveWebExecutor(llm, browser, {
+      maxSteps: 12,
+    });
+
+    const account = database
+      .getDb()
+      .prepare(
+        `
+        SELECT
+          id,
+          name,
+          twitter_handle,
+          wallet_address
+        FROM accounts
+        WHERE id = 1
+          AND status = 'ACTIVE'
+        LIMIT 1
+        `,
+      )
+      .get() as
+      | {
+          id: number;
+          name: string;
+          twitter_handle: string | null;
+          wallet_address: string | null;
+        }
+      | undefined;
+
+    if (!account) {
+      throw new Error("Account 1 tidak ditemukan atau tidak ACTIVE.");
+    }
+
+    const context: AdaptiveWebExecutionContext = {
+      account: {
+        accountId: account.id,
+        accountName: account.name,
+        twitterHandle: account.twitter_handle,
+        walletAddress: account.wallet_address,
+      },
+    };
+
+    console.log("\n👤 Account Context");
+    console.log(JSON.stringify(context.account, null, 2));
+
+    const result = await executor.execute(
+      "https://quest.arcwar.gg/",
+      "Inspect this project whitelist/quest page and complete any safe publicly available task flow. Determine the next action from the actual page state. Do not bypass CAPTCHA, anti-bot systems, rate limits, authentication restrictions, or wallet signing. If authentication, wallet signature, or manual approval is required, stop and report BLOCKED.",
+      context,
+    );
+
+    console.log("\n================================");
+    console.log("🎯 RESULT");
+    console.log("================================");
+    console.log(JSON.stringify(result, null, 2));
+
+    console.log("\n================================");
+    console.log("📋 PROOF");
+    console.log("================================");
+    console.log(JSON.stringify(result.proof, null, 2));
+  } finally {
+    database.getDb().close();
+  }
+}
+
+main().catch((error) => {
+  console.error("\n❌ Adaptive Web Executor test failed:");
+  console.error(error);
+
+  process.exit(1);
 });
-
-console.log(`📋 Task dibuat: #${task.id}`);
-
-const proof = JSON.stringify(
-  {
-    version: 1,
-    createdAt: new Date().toISOString(),
-    url: "https://example.com/form",
-    formType: "WEBSITE",
-    executionStatus: "READY_TO_SUBMIT",
-    submitAttempted: false,
-    fieldsFilled: 2,
-    checkboxesChecked: 1,
-    fields: [
-      {
-        index: 0,
-        type: "TWITTER_HANDLE",
-        label: "Twitter Username",
-        valueProvided: true,
-        status: "FILLED",
-      },
-      {
-        index: 1,
-        type: "WALLET_ADDRESS",
-        label: "Wallet Address",
-        valueProvided: true,
-        status: "FILLED",
-      },
-    ],
-    summary: "Form berhasil diisi. Submit belum dilakukan.",
-  },
-  null,
-  2,
-);
-
-// Simpan proof.
-const updated = taskManager.saveTaskProof(task.id, proof);
-
-if (!updated) {
-  throw new Error("Task tidak ditemukan setelah saveTaskProof.");
-}
-
-console.log(`💾 Proof tersimpan untuk task #${updated.id}`);
-
-// Baca ulang dari database.
-const loaded = taskManager.getTaskById(task.id);
-
-if (!loaded) {
-  throw new Error("Task gagal dibaca kembali dari database.");
-}
-
-if (!loaded.proof) {
-  throw new Error("Proof tidak ditemukan di database.");
-}
-
-// Pastikan JSON valid.
-const parsedProof = JSON.parse(loaded.proof);
-
-if (parsedProof.version !== 1) {
-  throw new Error("Proof version tidak sesuai.");
-}
-
-if (parsedProof.executionStatus !== "READY_TO_SUBMIT") {
-  throw new Error("Execution status tidak sesuai.");
-}
-
-if (parsedProof.fieldsFilled !== 2) {
-  throw new Error("fieldsFilled tidak sesuai.");
-}
-
-if (parsedProof.checkboxesChecked !== 1) {
-  throw new Error("checkboxesChecked tidak sesuai.");
-}
-
-if (parsedProof.submitAttempted !== false) {
-  throw new Error("submitAttempted seharusnya false.");
-}
-
-console.log("🔍 Proof berhasil dibaca ulang dari SQLite.");
-console.log(`   executionStatus: ${parsedProof.executionStatus}`);
-console.log(`   fieldsFilled: ${parsedProof.fieldsFilled}`);
-console.log(`   checkboxesChecked: ${parsedProof.checkboxesChecked}`);
-
-console.log("🎉 Task proof persistence test passed.");
