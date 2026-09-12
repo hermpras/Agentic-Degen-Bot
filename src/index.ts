@@ -1,4 +1,4 @@
-import { Bot } from "grammy";
+import { Bot, Context } from "grammy";
 import { config } from "./config/index.js";
 import { GeminiProvider } from "./providers/gemini.provider.js";
 import { AgentDatabase } from "./database/agent-database.js";
@@ -14,18 +14,15 @@ if (!config.telegramBotToken || !config.geminiApiKey) {
   console.error(
     "❌ Gagal menjalankan bot: TELEGRAM_BOT_TOKEN atau GEMINI_API_KEY belum diisi di file .env!",
   );
-
   process.exit(1);
 }
 
 ensureWorkspaceDirExists();
 
 const database = new AgentDatabase("data/agent.db");
-
 console.log("💾 SQLite Database aktif (data/agent.db)");
 
 const memoryManager = new MemoryManager(database);
-
 console.log("🧠 Memory Manager aktif.");
 
 const llmProvider = new GeminiProvider(config.geminiApiKey);
@@ -50,6 +47,43 @@ const approvalServices = profiles.map(
 
 const bot = new Bot(config.telegramBotToken);
 
+const TELEGRAM_MAX_MESSAGE_LENGTH = 4000;
+
+function splitTelegramMessage(text: string): string[] {
+  if (text.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > TELEGRAM_MAX_MESSAGE_LENGTH) {
+    let splitAt = remaining.lastIndexOf("\n", TELEGRAM_MAX_MESSAGE_LENGTH);
+
+    if (splitAt <= 0) {
+      splitAt = TELEGRAM_MAX_MESSAGE_LENGTH;
+    }
+
+    chunks.push(remaining.slice(0, splitAt));
+
+    remaining = remaining.slice(splitAt).replace(/^\n/, "");
+  }
+
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
+}
+
+async function replyLongMessage(ctx: Context, text: string): Promise<void> {
+  const chunks = splitTelegramMessage(text);
+
+  for (const chunk of chunks) {
+    await ctx.reply(chunk);
+  }
+}
+
 bot.command("start", async (ctx) => {
   await ctx.reply(
     "👋 Halo! Saya Degen AI Agent.\n\nSaya bisa melakukan riset, development, menggunakan tools, dan mengingat percakapan kita.",
@@ -59,7 +93,6 @@ bot.command("start", async (ctx) => {
 bot.on("message:text", async (ctx) => {
   const userText = ctx.message.text;
   const chatId = ctx.chat.id;
-
   const loadingMsg = await ctx.reply("🤔 Sedang berpikir & mengingat...");
 
   try {
@@ -144,9 +177,17 @@ bot.callbackQuery(/^approve:(.+)$/, async (ctx) => {
     text: "Approval disetujui.",
   });
 
-  const result = await service.approveAndExecute(approvalId, chatId);
+  try {
+    const result = await service.approveAndExecute(approvalId, chatId);
 
-  await ctx.reply(result);
+    await replyLongMessage(ctx, result);
+  } catch (error) {
+    console.error(`Error saat menjalankan approval ${approvalId}:`, error);
+
+    await ctx.reply(
+      "❌ Approval berhasil disetujui, tetapi terjadi error saat menjalankan tool. Cek terminal untuk detail.",
+    );
+  }
 });
 
 bot.callbackQuery(/^reject:(.+)$/, async (ctx) => {
@@ -186,6 +227,10 @@ bot.callbackQuery(/^reject:(.+)$/, async (ctx) => {
       ? "❌ Approval ditolak. Tool tidak dijalankan."
       : "⚠️ Approval request tidak ditemukan.",
   );
+});
+
+bot.catch((error) => {
+  console.error("❌ Unhandled Grammy error:", error.error);
 });
 
 bot.start({

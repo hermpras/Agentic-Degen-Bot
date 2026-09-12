@@ -35,10 +35,6 @@ export class Agent {
     return this.toolRegistry;
   }
 
-  /**
-   * Memproses pesan pengguna melalui Reasoning Loop
-   * dengan memuat & menyimpan riwayat percakapan.
-   */
   async processMessage(
     userMessage: string,
     chatId?: string | number,
@@ -54,6 +50,10 @@ export class Agent {
       messages = [{ role: "user", content: userMessage }];
     }
 
+    const explicitlyRequestedPlanId = this.extractExplicitPlanId(userMessage);
+    const executionIntent = this.hasExecutionIntent(userMessage);
+
+    let freshCreatedPlanId: number | null = null;
     let iteration = 0;
 
     while (iteration < this.maxIterations) {
@@ -66,10 +66,36 @@ export class Agent {
       );
 
       try {
+        /**
+         * Execution workflow guard.
+         *
+         * Kalau user meminta execution tanpa memberikan planId,
+         * Agent wajib membuat fresh task plan terlebih dahulu.
+         *
+         * Jangan menggunakan planId lama dari conversation memory.
+         */
+        const executionWorkflowInstruction =
+          executionIntent &&
+          explicitlyRequestedPlanId === null &&
+          freshCreatedPlanId === null
+            ? [
+                "",
+                "ATURAN INTERNAL EXECUTION WORKFLOW:",
+                "User meminta execution/kerjakan/jalankan task.",
+                "User TIDAK memberikan planId secara eksplisit.",
+                "JANGAN menggunakan planId dari conversation memory.",
+                "JANGAN memanggil execute_project_task_plan.",
+                "JANGAN memberikan jawaban final sebelum membuat task plan baru.",
+                "Gunakan create_project_task_plan berdasarkan requirements project yang relevan dari conversation.",
+                "Setelah create_project_task_plan berhasil, Agent akan meneruskan execution menggunakan planId baru tersebut.",
+              ].join("\n")
+            : "";
+
         const result = await this.provider.generate({
           messages,
           tools,
-          systemInstruction: this.systemInstruction,
+          systemInstruction:
+            this.systemInstruction + executionWorkflowInstruction,
         });
 
         if (result.toolCalls && result.toolCalls.length > 0) {
@@ -86,6 +112,100 @@ export class Agent {
               call.args,
             );
 
+            /**
+             * Guard #1:
+             *
+             * execute_project_task_plan hanya boleh memakai:
+             * - planId yang diberikan eksplisit oleh user terbaru, atau
+             * - fresh planId yang baru dibuat pada turn ini.
+             */
+            if (
+              call.name === "execute_project_task_plan" &&
+              !this.isExecutionAllowed(
+                call.args,
+                explicitlyRequestedPlanId,
+                freshCreatedPlanId,
+              )
+            ) {
+              const blockedResult = JSON.stringify({
+                success: false,
+                blocked: true,
+                reason:
+                  "Execution ditahan oleh Agent Guard karena planId tidak berasal dari instruksi user terbaru dan belum merupakan plan baru yang dibuat pada turn ini.",
+                actionRequired:
+                  "Jangan panggil execute_project_task_plan lagi. Buat task plan baru terlebih dahulu menggunakan create_project_task_plan berdasarkan requirements project yang relevan.",
+                explicitlyRequestedPlanId,
+                freshCreatedPlanId,
+              });
+
+              console.log(
+                "🛡️ [Agent Guard] execute_project_task_plan ditahan karena planId tidak valid untuk execution turn ini.",
+              );
+
+              console.log(
+                `📦 [Agent] Hasil guard "execute_project_task_plan":`,
+                blockedResult,
+              );
+
+              messages.push({
+                role: "user",
+                rawParts: [
+                  {
+                    functionResponse: {
+                      name: call.name,
+                      response: {
+                        result: blockedResult,
+                      },
+                    },
+                  },
+                ],
+              });
+
+              continue;
+            }
+
+            /**
+             * Guard #2:
+             *
+             * Untuk execution intent tanpa explicit planId,
+             * execution tidak boleh dilakukan sebelum ada fresh plan.
+             */
+            if (
+              call.name === "execute_project_task_plan" &&
+              executionIntent &&
+              explicitlyRequestedPlanId === null &&
+              freshCreatedPlanId === null
+            ) {
+              const blockedResult = JSON.stringify({
+                success: false,
+                blocked: true,
+                reason:
+                  "Execution belum boleh dilakukan karena belum ada fresh task plan pada turn ini.",
+                actionRequired:
+                  "Buat task plan baru menggunakan create_project_task_plan terlebih dahulu. Jangan gunakan plan lama dari conversation memory.",
+              });
+
+              console.log(
+                "🛡️ [Agent Guard] Execution ditahan karena fresh plan belum dibuat.",
+              );
+
+              messages.push({
+                role: "user",
+                rawParts: [
+                  {
+                    functionResponse: {
+                      name: call.name,
+                      response: {
+                        result: blockedResult,
+                      },
+                    },
+                  },
+                ],
+              });
+
+              continue;
+            }
+
             const toolResult = await this.toolRegistry.executeTool(
               call.name,
               call.args,
@@ -97,18 +217,166 @@ export class Agent {
               toolResult,
             );
 
+            /**
+             * Capture fresh planId dari create_project_task_plan.
+             */
+            if (call.name === "create_project_task_plan") {
+              const createdPlanId = this.extractCreatedPlanId(toolResult);
+
+              if (createdPlanId !== null) {
+                freshCreatedPlanId = createdPlanId;
+
+                console.log(
+                  `🆕 [Agent] Fresh task plan terdeteksi: #${freshCreatedPlanId}.`,
+                );
+              }
+            }
+
+            /**
+             * Simpan hasil tool ke conversation state.
+             */
             messages.push({
               role: "user",
               rawParts: [
                 {
                   functionResponse: {
                     name: call.name,
-                    response: { result: toolResult },
+                    response: {
+                      result: toolResult,
+                    },
                   },
                 },
               ],
             });
+
+            /**
+             * ============================================================
+             * DETERMINISTIC EXECUTION CONTINUATION
+             * ============================================================
+             *
+             * Ini inti fix untuk bug:
+             *
+             * User:
+             *   "langsung kerjakan Arc Ape"
+             *
+             * LLM:
+             *   create_project_task_plan
+             *
+             * Tool:
+             *   { planId: 1, status: "PLANNED" }
+             *
+             * Sebelumnya Agent membiarkan LLM memutuskan apakah berhenti
+             * atau lanjut.
+             *
+             * Sekarang:
+             *
+             *   execution intent
+             *       +
+             *   create plan sukses
+             *       +
+             *   fresh planId
+             *       ↓
+             *   AUTOMATIC execute_project_task_plan
+             *
+             * Approval boundary tetap aktif karena execution dilakukan
+             * melalui ToolRegistry.executeTool().
+             */
+            if (
+              call.name === "create_project_task_plan" &&
+              executionIntent &&
+              explicitlyRequestedPlanId === null &&
+              freshCreatedPlanId !== null
+            ) {
+              console.log(
+                `🚀 [Agent] Execution intent terdeteksi setelah fresh plan #${freshCreatedPlanId}.`,
+              );
+
+              console.log(
+                `➡️ [Agent] Auto-continuation → execute_project_task_plan(${freshCreatedPlanId})`,
+              );
+
+              const executionArgs = {
+                planId: freshCreatedPlanId,
+              };
+
+              /**
+               * Tetap lewat ToolRegistry agar:
+               *
+               * SAFE
+               *   → direct execution
+               *
+               * APPROVAL
+               *   → dibuat approval request
+               *
+               * Jadi Agent tidak pernah bypass approval system.
+               */
+              const executionToolResult = await this.toolRegistry.executeTool(
+                "execute_project_task_plan",
+                executionArgs,
+                chatId,
+              );
+
+              console.log(
+                `📦 [Agent] Hasil auto-execution "execute_project_task_plan":`,
+                executionToolResult,
+              );
+
+              messages.push({
+                role: "user",
+                rawParts: [
+                  {
+                    functionResponse: {
+                      name: "execute_project_task_plan",
+                      response: {
+                        result: executionToolResult,
+                      },
+                    },
+                  },
+                ],
+              });
+
+              /**
+               * Jangan langsung return.
+               *
+               * Biarkan LLM membaca hasil execution/approval request
+               * dan menghasilkan jawaban ke user.
+               */
+              continue;
+            }
           }
+
+          continue;
+        }
+
+        /**
+         * Guard #3:
+         *
+         * Execution intent tanpa explicit planId belum boleh menghasilkan
+         * final answer sebelum fresh plan dibuat.
+         */
+        if (
+          result.text &&
+          executionIntent &&
+          explicitlyRequestedPlanId === null &&
+          freshCreatedPlanId === null
+        ) {
+          console.log(
+            "🛡️ [Agent Guard] Final answer ditahan karena execution intent belum menghasilkan fresh task plan.",
+          );
+
+          const forcedPlanningInstruction = [
+            "Execution workflow belum selesai.",
+            "Jangan memberikan jawaban final kepada user.",
+            "User meminta task dijalankan tetapi belum memberikan planId.",
+            "Jangan gunakan planId lama dari conversation memory.",
+            "Sekarang buat task plan baru dengan create_project_task_plan berdasarkan requirements project yang relevan.",
+            "Setelah tool tersebut berhasil, Agent akan otomatis meneruskan execution.",
+          ].join("\n");
+
+          messages.push({
+            role: "user",
+            content: forcedPlanningInstruction,
+          });
 
           continue;
         }
@@ -137,5 +405,105 @@ export class Agent {
     }
 
     return "⚠️ Agent mencapai batas maksimum iterasi tanpa menghasilkan jawaban.";
+  }
+
+  private hasExecutionIntent(message: string): boolean {
+    const text = message.toLowerCase();
+
+    const executionPatterns = [
+      /\bkerjakan\b/,
+      /\bjalan(?:kan)?\b/,
+      /\bjalankan\b/,
+      /\beksekusi\b/,
+      /\bexecute\b/,
+      /\blangsung\s+kerja/,
+      /\blangsung\s+jalan/,
+      /\blanjutkan\s+eksekusi/,
+      /\bdo\s+it\b/,
+      /\bstart\s+execution\b/,
+    ];
+
+    return executionPatterns.some((pattern) => pattern.test(text));
+  }
+
+  private isExecutionAllowed(
+    args: Record<string, any>,
+    explicitlyRequestedPlanId: number | null,
+    freshCreatedPlanId: number | null,
+  ): boolean {
+    const planId = this.normalizePlanId(args?.planId);
+
+    if (planId === null) {
+      return false;
+    }
+
+    if (
+      explicitlyRequestedPlanId !== null &&
+      planId === explicitlyRequestedPlanId
+    ) {
+      return true;
+    }
+
+    if (freshCreatedPlanId !== null && planId === freshCreatedPlanId) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private extractExplicitPlanId(message: string): number | null {
+    const text = message.trim();
+
+    const patterns = [
+      /\bplanId\s*[:#]?\s*(\d+)\b/i,
+      /\bplan\s*#?\s*(\d+)\b/i,
+      /\btask\s*plan\s*#?\s*(\d+)\b/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+
+      if (match) {
+        const planId = Number(match[1]);
+
+        if (Number.isInteger(planId) && planId > 0) {
+          return planId;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private extractCreatedPlanId(toolResult: string): number | null {
+    try {
+      const parsed = JSON.parse(toolResult) as {
+        success?: boolean;
+        planId?: number;
+        status?: string;
+      };
+
+      if (
+        parsed.success === true &&
+        typeof parsed.planId === "number" &&
+        Number.isInteger(parsed.planId) &&
+        parsed.planId > 0 &&
+        parsed.status === "PLANNED"
+      ) {
+        return parsed.planId;
+      }
+    } catch {
+      // Ignore non-JSON tool results.
+    }
+
+    return null;
+  }
+
+  private normalizePlanId(value: unknown): number | null {
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+      return null;
+    }
+
+    return value;
   }
 }

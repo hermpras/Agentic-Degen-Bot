@@ -91,7 +91,6 @@ export class TaskExecutor {
     completedPlanTaskIds = new Set<string>(),
   ): Promise<TaskExecutionResult> {
     console.log("");
-
     console.log(
       `⚙️ [TaskExecutor] Executing ${task.taskType} → ${task.projectName} / ${task.accountName}`,
     );
@@ -146,7 +145,6 @@ export class TaskExecutor {
         this.taskManager.markTaskFailed(databaseTaskId, errorMessage);
 
         console.error(`❌ [TaskExecutor] Task FAILED: ${task.planTaskId}`);
-
         console.error(errorMessage);
 
         return {
@@ -182,7 +180,6 @@ export class TaskExecutor {
       const message = error instanceof Error ? error.message : String(error);
 
       console.error(`❌ [TaskExecutor] Task FAILED: ${task.planTaskId}`);
-
       console.error(message);
 
       if (databaseTaskId !== null) {
@@ -262,6 +259,8 @@ export class TaskExecutor {
     });
 
     try {
+      await browser.start();
+
       const result = await browser.open(task.targetUrl);
 
       return {
@@ -359,7 +358,6 @@ export class TaskExecutor {
     }
 
     console.log(`🔐 [TaskExecutor] FORM_WALLET → ${task.form.targetUrl}`);
-
     console.log(
       `👤 [TaskExecutor] Wallet account → ${account.accountName} / ${account.walletAddress}`,
     );

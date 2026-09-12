@@ -189,7 +189,7 @@ export class TaskPlanner {
           dependsOn.push(previousTaskId);
         }
 
-        /*
+        /**
          * Wallet connection is an execution capability.
          *
          * The project analyzer does not need to know about Rabby.
@@ -212,7 +212,7 @@ export class TaskPlanner {
             targetUrl:
               requirement.targetUrl?.trim() ||
               requirement.form?.targetUrl?.trim() ||
-              null,
+              sourceUrl,
             description:
               `Connect and verify wallet for account "${account.name}" ` +
               `before executing: ${requirement.description.trim()}`,
@@ -253,6 +253,31 @@ export class TaskPlanner {
 
         const plannedTaskId = `account-${account.id}-task-${requirementIndex + 1}`;
 
+        /**
+         * Untuk task yang tidak punya targetUrl eksplisit,
+         * gunakan sourceUrl sebagai fallback.
+         *
+         * Contoh:
+         *
+         * sourceUrl:
+         *   https://www.arcape.wtf
+         *
+         * requirement:
+         *   {
+         *     type: "OPEN_PAGE",
+         *     targetUrl: null
+         *   }
+         *
+         * hasil:
+         *   targetUrl: "https://www.arcape.wtf"
+         *
+         * Ini memastikan OPEN_PAGE selalu punya URL yang bisa
+         * dieksekusi oleh TaskExecutor.
+         */
+        const targetUrl =
+          requirement.targetUrl?.trim() ||
+          (requirement.type === "OPEN_PAGE" ? sourceUrl : null);
+
         const plannedTask: PlannedTask = {
           planTaskId: plannedTaskId,
           projectName,
@@ -261,7 +286,7 @@ export class TaskPlanner {
           twitterHandle: account.twitter_handle,
           walletAddress: account.wallet_address,
           taskType: requirement.type,
-          targetUrl: requirement.targetUrl?.trim() || null,
+          targetUrl,
           description: requirement.description.trim(),
           dependsOn,
           outputKey,
