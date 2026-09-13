@@ -89,6 +89,7 @@ export interface PlannedTask {
   accountName: string;
   twitterHandle: string | null;
   walletAddress: string | null;
+  proof: string | null;
   taskType: PlannedTaskType;
   targetUrl: string | null;
   description: string;
@@ -208,6 +209,7 @@ export class TaskPlanner {
             accountName: account.name,
             twitterHandle: account.twitter_handle,
             walletAddress: account.wallet_address,
+            proof: null,
             taskType: "CONNECT_WALLET",
             targetUrl:
               requirement.targetUrl?.trim() ||
@@ -255,7 +257,7 @@ export class TaskPlanner {
 
         /**
          * Untuk task yang tidak punya targetUrl eksplisit,
-         * gunakan sourceUrl sebagai fallback.
+         * gunakan sourceUrl sebagai fallback hanya untuk OPEN_PAGE.
          *
          * Contoh:
          *
@@ -285,6 +287,20 @@ export class TaskPlanner {
           accountName: account.name,
           twitterHandle: account.twitter_handle,
           walletAddress: account.wallet_address,
+
+          /**
+           * Proof inheritance:
+           *
+           * Task tertentu seperti comment/reply/quote dapat membutuhkan
+           * URL proof. Jika account mempunyai defaultProofUrl, planner
+           * membawa nilai tersebut ke PlannedTask.
+           *
+           * Task yang tidak membutuhkan proof tidak mendapatkannya.
+           */
+          proof: this.requiresProof(requirement)
+            ? account.default_proof_url
+            : null,
+
           taskType: requirement.type,
           targetUrl,
           description: requirement.description.trim(),
@@ -308,6 +324,14 @@ export class TaskPlanner {
       taskCount: tasks.length,
       tasks,
     };
+  }
+
+  private requiresProof(requirement: TaskRequirement): boolean {
+    return (
+      requirement.type === "X_COMMENT" ||
+      requirement.type === "X_REPLY" ||
+      requirement.type === "X_QUOTE"
+    );
   }
 
   private requiresWalletConnection(requirement: TaskRequirement): boolean {
@@ -422,7 +446,8 @@ export class TaskPlanner {
         id,
         name,
         twitter_handle,
-        wallet_address
+        wallet_address,
+        default_proof_url
       FROM accounts
       WHERE status = 'ACTIVE'
       ORDER BY id ASC
@@ -446,4 +471,5 @@ interface AccountRow {
   name: string;
   twitter_handle: string | null;
   wallet_address: string | null;
+  default_proof_url: string | null;
 }
