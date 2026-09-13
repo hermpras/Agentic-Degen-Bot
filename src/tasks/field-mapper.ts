@@ -33,6 +33,7 @@ export class FieldMapper {
     const discordScore = this.scoreDiscordField(searchableText);
     const telegramScore = this.scoreTelegramField(searchableText);
     const tweetUrlScore = this.scoreTweetUrlField(searchableText);
+    const proofUrlScore = this.scoreProofUrlField(searchableText);
 
     const candidates: Array<{
       type: FormFieldType;
@@ -69,6 +70,11 @@ export class FieldMapper {
         score: tweetUrlScore,
         reason: "Field mengandung indikator tweet/post URL.",
       },
+      {
+        type: "PROOF_URL",
+        score: proofUrlScore,
+        reason: "Field mengandung indikator proof/evidence URL.",
+      },
     ];
 
     candidates.sort((a, b) => b.score - a.score);
@@ -98,7 +104,6 @@ export class FieldMapper {
       this.containsAny(text, [
         "twitter username",
         "twitter handle",
-        "twitter username",
         "x username",
         "x handle",
         "x account",
@@ -232,6 +237,38 @@ export class FieldMapper {
     return 0;
   }
 
+  private scoreProofUrlField(text: string): number {
+    if (
+      this.containsAny(text, [
+        "proof url",
+        "proof link",
+        "proof",
+        "evidence url",
+        "evidence link",
+        "evidence",
+        "proof of action",
+        "proof of completion",
+        "proof of participation",
+      ])
+    ) {
+      return 100;
+    }
+
+    if (
+      this.containsAny(text, [
+        "comment proof",
+        "reply proof",
+        "quote proof",
+        "x proof",
+        "twitter proof",
+      ])
+    ) {
+      return 100;
+    }
+
+    return 0;
+  }
+
   private containsAny(text: string, keywords: string[]): boolean {
     return keywords.some((keyword) =>
       text.includes(this.normalizeText(keyword)),
@@ -242,7 +279,7 @@ export class FieldMapper {
     return value
       .trim()
       .toLowerCase()
-      .replace(/[_-]+/g, " ")
+      .replace(/[\_-]+/g, " ")
       .replace(/\s+/g, " ");
   }
 }

@@ -23,6 +23,7 @@ export type FormFieldType =
   | "TWITTER_HANDLE"
   | "WALLET_ADDRESS"
   | "OWN_TWEET_URL"
+  | "PROOF_URL"
   | "TEXT"
   | "EMAIL"
   | "DISCORD"
@@ -199,7 +200,6 @@ export class TaskPlanner {
          */
         if (this.requiresWalletConnection(requirement)) {
           const connectTaskId = `account-${account.id}-wallet-${requirementIndex + 1}`;
-
           const connectDependsOn = previousTaskId ? [previousTaskId] : [];
 
           const connectTask: PlannedTask = {
@@ -258,23 +258,6 @@ export class TaskPlanner {
         /**
          * Untuk task yang tidak punya targetUrl eksplisit,
          * gunakan sourceUrl sebagai fallback hanya untuk OPEN_PAGE.
-         *
-         * Contoh:
-         *
-         * sourceUrl:
-         *   https://www.arcape.wtf
-         *
-         * requirement:
-         *   {
-         *     type: "OPEN_PAGE",
-         *     targetUrl: null
-         *   }
-         *
-         * hasil:
-         *   targetUrl: "https://www.arcape.wtf"
-         *
-         * Ini memastikan OPEN_PAGE selalu punya URL yang bisa
-         * dieksekusi oleh TaskExecutor.
          */
         const targetUrl =
           requirement.targetUrl?.trim() ||
@@ -289,13 +272,10 @@ export class TaskPlanner {
           walletAddress: account.wallet_address,
 
           /**
-           * Proof inheritance:
+           * Execution proof tetap disimpan terpisah.
            *
-           * Task tertentu seperti comment/reply/quote dapat membutuhkan
-           * URL proof. Jika account mempunyai defaultProofUrl, planner
-           * membawa nilai tersebut ke PlannedTask.
-           *
-           * Task yang tidak membutuhkan proof tidak mendapatkannya.
+           * Ini bukan input form. Input proof URL untuk form
+           * sekarang ditangani sebagai FormFieldType.PROOF_URL.
            */
           proof: this.requiresProof(requirement)
             ? account.default_proof_url
@@ -431,6 +411,9 @@ export class TaskPlanner {
 
       case "WALLET_ADDRESS":
         return account.wallet_address ?? null;
+
+      case "PROOF_URL":
+        return account.default_proof_url ?? null;
 
       case "OWN_TWEET_URL":
         return null;
