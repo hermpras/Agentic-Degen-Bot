@@ -42,7 +42,6 @@ export class ProjectTaskAnalyzer {
     );
 
     const page = await this.options.browser.open(parsedUrl.toString());
-
     const context = this.buildPageContext(page.text);
 
     const result = await this.options.llm.generate({
@@ -92,7 +91,9 @@ Your job is ONLY to inspect a project/quest/whitelist webpage and convert
 the visible requirements into a structured task plan.
 
 Do NOT execute any task.
+
 Do NOT click anything.
+
 Do NOT invent requirements that are not supported by the page.
 
 The user will eventually want the agent to execute the requirements for
@@ -101,39 +102,93 @@ multiple accounts.
 Supported task types:
 
 OPEN_PAGE
+
 X_FOLLOW
+
 X_LIKE
+
 X_REPOST
+
 X_COMMENT
+
 X_REPLY
+
 X_QUOTE
+
 X_POST
+
 FORM
+
 FORM_TWITTER
+
 FORM_WALLET
+
 FORM_SUBMIT
+
 WHITELIST
+
+CUSTOM
+
+Supported form field types:
+
+TWITTER_HANDLE
+WALLET_ADDRESS
+OWN_TWEET_URL
+PROOF_URL
+TEXT
+EMAIL
+DISCORD
+TELEGRAM
 CUSTOM
 
 Rules:
 
 1. Identify the project name from the page when possible.
+
 2. Identify every actionable requirement that is clearly visible.
+
 3. For X tasks, provide the actual target URL when it is available.
+
 4. For website/form tasks, provide the relevant target URL.
+
 5. Do not create one generic "complete everything" task if the page exposes
    multiple distinct requirements.
+
 6. Preserve task order when the page implies an order.
+
 7. If a requirement needs a wallet, classify it appropriately as
    FORM_WALLET or another supported wallet-related task.
+
 8. If a requirement is ambiguous, use CUSTOM instead of inventing details.
+
 9. Do not create project-specific executor logic.
+
 10. Do not create CSS selectors unless they are explicitly needed later.
+
 11. Do not assume wallet connection timing. The executor will determine
     whether wallet connection is needed before or during a later action.
+
 12. targetUrl should point to the actual page relevant to the task whenever
     that URL is known.
+
 13. Return only requirements that are actually supported by the inspected page.
+
+14. If a form explicitly asks the user to provide a proof/evidence URL,
+    classify that field as PROOF_URL.
+
+15. Use PROOF_URL specifically when the form expects a URL/link proving that
+    an action was completed, such as an X comment URL, X reply URL, X quote
+    URL, tweet URL, or other task completion evidence.
+
+16. Do not invent a proof URL.
+
+17. Leave the PROOF_URL field value empty/null when the actual proof URL is
+    not known yet. The existing TaskPlanner may populate it from the active
+    account's configured default proof URL.
+
+18. Do not confuse PROOF_URL with OWN_TWEET_URL. OWN_TWEET_URL is specifically
+    a URL produced by a task where the account creates its own tweet.
+    PROOF_URL is evidence/proof submitted to a form for a completed action.
 
 The result will be passed into an existing TaskPlanner which creates
 one task set per active account.
@@ -149,18 +204,33 @@ one task set per active account.
 Analyze this project page.
 
 SOURCE URL:
+
 ${sourceUrl}
 
 PAGE TITLE:
+
 ${title}
 
 VISIBLE PAGE CONTENT:
+
 ${pageText}
 
 Create the structured project task plan.
 
 Focus on WHAT the user needs to accomplish, not HOW the browser should
 click or interact with the page.
+
+Pay special attention to forms asking for:
+- Twitter/X username
+- wallet address
+- tweet URL
+- reply/comment/quote proof URL
+- proof/evidence URL
+- social account information
+- other task completion evidence
+
+If a form asks for proof/evidence as a URL, classify that field as PROOF_URL.
+Do not invent the proof URL value.
 `.trim();
   }
 
@@ -177,10 +247,12 @@ click or interact with the page.
             type: "string" as const,
             description: "Project name.",
           },
+
           sourceUrl: {
             type: "string" as const,
             description: "Original project URL.",
           },
+
           requirements: {
             type: "array" as const,
             description: "Actionable project requirements in execution order.",
@@ -207,25 +279,30 @@ click or interact with the page.
                     "CUSTOM",
                   ],
                 },
+
                 description: {
                   type: "string" as const,
                   description: "Human-readable description of the requirement.",
                 },
+
                 targetUrl: {
                   type: "string" as const,
                   description:
                     "URL relevant to this specific requirement, if known.",
                 },
+
                 producesOwnTweetUrl: {
                   type: "boolean" as const,
                   description:
                     "Whether this task produces a URL of a tweet created by the account.",
                 },
+
                 requiresOwnTweetUrl: {
                   type: "boolean" as const,
                   description:
                     "Whether this task requires a previously created own tweet URL.",
                 },
+
                 form: {
                   type: "object" as const,
                   description:
@@ -235,9 +312,11 @@ click or interact with the page.
                       type: "string" as const,
                       enum: ["WEBSITE", "GOOGLE_FORM"],
                     },
+
                     targetUrl: {
                       type: "string" as const,
                     },
+
                     fields: {
                       type: "array" as const,
                       items: {
@@ -249,6 +328,7 @@ click or interact with the page.
                               "TWITTER_HANDLE",
                               "WALLET_ADDRESS",
                               "OWN_TWEET_URL",
+                              "PROOF_URL",
                               "TEXT",
                               "EMAIL",
                               "DISCORD",
@@ -256,19 +336,24 @@ click or interact with the page.
                               "CUSTOM",
                             ],
                           },
+
                           label: {
                             type: "string" as const,
                           },
+
                           required: {
                             type: "boolean" as const,
                           },
+
                           value: {
                             type: "string" as const,
                           },
                         },
+
                         required: ["type"],
                       },
                     },
+
                     checkboxes: {
                       type: "array" as const,
                       items: {
@@ -286,29 +371,37 @@ click or interact with the page.
                               "CUSTOM",
                             ],
                           },
+
                           label: {
                             type: "string" as const,
                           },
+
                           required: {
                             type: "boolean" as const,
                           },
+
                           checked: {
                             type: "boolean" as const,
                           },
                         },
+
                         required: ["type"],
                       },
                     },
                   },
+
                   required: ["formType", "targetUrl"],
                 },
               },
+
               required: ["type", "description"],
             },
           },
         },
+
         required: ["projectName", "sourceUrl", "requirements"],
       },
+
       async execute() {
         throw new Error(
           "create_project_task_plan hanya boleh dipanggil sebagai structured analyzer output.",
@@ -372,16 +465,22 @@ click or interact with the page.
         return {
           type: type as TaskRequirement["type"],
           description,
+
           targetUrl:
             typeof requirement.targetUrl === "string"
               ? requirement.targetUrl.trim() || null
               : null,
+
           producesOwnTweetUrl: requirement.producesOwnTweetUrl ?? false,
+
           requiresOwnTweetUrl: requirement.requiresOwnTweetUrl ?? false,
+
           form: requirement.form
             ? {
                 formType: requirement.form.formType,
+
                 targetUrl: String(requirement.form.targetUrl ?? "").trim(),
+
                 fields: (requirement.form.fields ?? []).map((field) => ({
                   type: field.type,
                   label: field.label?.trim(),
@@ -389,6 +488,7 @@ click or interact with the page.
                   value:
                     typeof field.value === "string" ? field.value.trim() : null,
                 })),
+
                 checkboxes: (requirement.form.checkboxes ?? []).map(
                   (checkbox) => ({
                     type: checkbox.type,
@@ -397,6 +497,7 @@ click or interact with the page.
                     checked: checkbox.checked ?? true,
                   }),
                 ),
+
                 submit: undefined,
               }
             : undefined,
