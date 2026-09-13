@@ -13,12 +13,13 @@ export const updateAccountTool: Tool = {
   name: "update_account",
 
   description:
-    "Memperbarui account whitelist yang SUDAH ADA berdasarkan nama account. Gunakan tool ini jika user ingin mengubah Twitter/X, wallet address, atau status account. JANGAN gunakan create_account untuk mengubah data account yang sudah ada.",
+    "Memperbarui account whitelist yang SUDAH ADA berdasarkan nama account. Gunakan tool ini jika user ingin mengubah Twitter/X, wallet address, default proof URL, atau status account. JANGAN gunakan create_account untuk mengubah data account yang sudah ada.",
 
   riskLevel: "SAFE",
 
   parameters: {
     type: "object",
+
     properties: {
       name: {
         type: "string",
@@ -36,6 +37,12 @@ export const updateAccountTool: Tool = {
         type: "string",
         description:
           "Wallet address baru. Hanya isi jika user meminta mengubah wallet.",
+      },
+
+      defaultProofUrl: {
+        type: "string",
+        description:
+          "Default proof URL baru untuk account. Hanya isi jika user meminta mengubah atau mengganti proof URL bawaan account. Gunakan null jika user ingin menghapus default proof URL.",
       },
 
       status: {
@@ -88,6 +95,13 @@ export const updateAccountTool: Tool = {
             : String(args.walletAddress).trim();
       }
 
+      if (args.defaultProofUrl !== undefined) {
+        input.defaultProofUrl =
+          args.defaultProofUrl === null
+            ? null
+            : String(args.defaultProofUrl).trim();
+      }
+
       if (args.status !== undefined) {
         const status = String(args.status).toUpperCase();
 
@@ -105,7 +119,7 @@ export const updateAccountTool: Tool = {
         return JSON.stringify({
           success: false,
           error:
-            "Tidak ada data yang perlu diubah. Tentukan Twitter/X, wallet address, atau status baru.",
+            "Tidak ada data yang perlu diubah. Tentukan Twitter/X, wallet address, default proof URL, atau status baru.",
         });
       }
 
@@ -121,11 +135,13 @@ export const updateAccountTool: Tool = {
       return JSON.stringify({
         success: true,
         message: "Account berhasil diperbarui.",
+
         account: {
           id: updated.id,
           name: updated.name,
           twitterHandle: updated.twitterHandle,
           walletAddress: updated.walletAddress,
+          defaultProofUrl: updated.defaultProofUrl,
           status: updated.status,
           updatedAt: updated.updatedAt,
         },
