@@ -55,6 +55,7 @@ export class AgentDatabase {
         name TEXT NOT NULL UNIQUE,
         twitter_handle TEXT,
         wallet_address TEXT,
+        default_proof_url TEXT,
         status TEXT NOT NULL DEFAULT 'ACTIVE',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -179,6 +180,25 @@ export class AgentDatabase {
 
       console.log(
         "🗄️ [Database] Migration applied: tasks.target_url ditambahkan.",
+      );
+    }
+
+    const accountColumns = this.db.pragma("table_info(accounts)") as Array<{
+      name: string;
+    }>;
+
+    const hasDefaultProofUrl = accountColumns.some(
+      (column) => column.name === "default_proof_url",
+    );
+
+    if (!hasDefaultProofUrl) {
+      this.db.exec(`
+        ALTER TABLE accounts
+        ADD COLUMN default_proof_url TEXT;
+      `);
+
+      console.log(
+        "🗄️ [Database] Migration applied: accounts.default_proof_url ditambahkan.",
       );
     }
   }

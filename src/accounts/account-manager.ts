@@ -7,6 +7,7 @@ export interface Account {
   name: string;
   twitterHandle: string | null;
   walletAddress: string | null;
+  defaultProofUrl: string | null;
   status: AccountStatus;
   createdAt: string;
   updatedAt: string;
@@ -16,11 +17,13 @@ export interface CreateAccountInput {
   name: string;
   twitterHandle?: string;
   walletAddress?: string;
+  defaultProofUrl?: string;
 }
 
 export interface UpdateAccountInput {
   twitterHandle?: string | null;
   walletAddress?: string | null;
+  defaultProofUrl?: string | null;
   status?: AccountStatus;
 }
 
@@ -45,15 +48,17 @@ export class AccountManager {
         name,
         twitter_handle,
         wallet_address,
+        default_proof_url,
         status
       )
-      VALUES (?, ?, ?, 'ACTIVE')
+      VALUES (?, ?, ?, ?, 'ACTIVE')
     `);
 
     const result = stmt.run(
       name,
       input.twitterHandle?.trim() || null,
       input.walletAddress?.trim() || null,
+      input.defaultProofUrl?.trim() || null,
     );
 
     const account = this.getAccountById(Number(result.lastInsertRowid));
@@ -76,6 +81,7 @@ export class AccountManager {
         name,
         twitter_handle,
         wallet_address,
+        default_proof_url,
         status,
         created_at,
         updated_at
@@ -95,6 +101,7 @@ export class AccountManager {
         name,
         twitter_handle,
         wallet_address,
+        default_proof_url,
         status,
         created_at,
         updated_at
@@ -114,6 +121,7 @@ export class AccountManager {
         name,
         twitter_handle,
         wallet_address,
+        default_proof_url,
         status,
         created_at,
         updated_at
@@ -133,6 +141,7 @@ export class AccountManager {
         name,
         twitter_handle,
         wallet_address,
+        default_proof_url,
         status,
         created_at,
         updated_at
@@ -163,6 +172,11 @@ export class AccountManager {
         ? input.walletAddress?.trim() || null
         : existing.walletAddress;
 
+    const defaultProofUrl =
+      input.defaultProofUrl !== undefined
+        ? input.defaultProofUrl?.trim() || null
+        : existing.defaultProofUrl;
+
     const status = input.status ?? existing.status;
 
     const stmt = this.database.getDb().prepare(`
@@ -170,12 +184,13 @@ export class AccountManager {
       SET
         twitter_handle = ?,
         wallet_address = ?,
+        default_proof_url = ?,
         status = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `);
 
-    stmt.run(twitterHandle, walletAddress, status, id);
+    stmt.run(twitterHandle, walletAddress, defaultProofUrl, status, id);
 
     return this.getAccountById(id);
   }
@@ -268,6 +283,7 @@ export class AccountManager {
       name: row.name,
       twitterHandle: row.twitter_handle,
       walletAddress: row.wallet_address,
+      defaultProofUrl: row.default_proof_url,
       status: row.status,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -280,6 +296,7 @@ interface AccountRow {
   name: string;
   twitter_handle: string | null;
   wallet_address: string | null;
+  default_proof_url: string | null;
   status: AccountStatus;
   created_at: string;
   updated_at: string;
