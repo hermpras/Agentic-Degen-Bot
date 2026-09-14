@@ -91,6 +91,7 @@ export class TaskExecutor {
     completedPlanTaskIds = new Set<string>(),
   ): Promise<TaskExecutionResult> {
     console.log("");
+
     console.log(
       `⚙️ [TaskExecutor] Executing ${task.taskType} → ${task.projectName} / ${task.accountName}`,
     );
@@ -145,6 +146,7 @@ export class TaskExecutor {
         this.taskManager.markTaskFailed(databaseTaskId, errorMessage);
 
         console.error(`❌ [TaskExecutor] Task FAILED: ${task.planTaskId}`);
+
         console.error(errorMessage);
 
         return {
@@ -180,6 +182,7 @@ export class TaskExecutor {
       const message = error instanceof Error ? error.message : String(error);
 
       console.error(`❌ [TaskExecutor] Task FAILED: ${task.planTaskId}`);
+
       console.error(message);
 
       if (databaseTaskId !== null) {
@@ -236,25 +239,26 @@ export class TaskExecutor {
   }
 
   /**
-   * X_CONNECT menggunakan browser session yang sudah tersedia.
+   * X_CONNECT menggunakan browser session khusus account.
    *
    * Tidak melakukan login username/password.
    *
-   * Mode browser:
-   * - X_CONNECT_CDP_URL
-   * - X_CDP_URL
-   * - X_STORAGE_STATE_PATH
+   * Session account dicari berdasarkan:
    *
-   * Untuk CDP:
-   * X_CONNECT_CDP_URL=http://127.0.0.1:9222
+   * X_CONNECT_CDP_URL_ACCOUNT_<ACCOUNT_ID>
+   * X_STORAGE_STATE_PATH_ACCOUNT_<ACCOUNT_ID>
    *
-   * Browser harus sudah memiliki session X yang login.
+   * Contoh:
    *
-   * Setelah OAuth dimulai, executor melakukan polling
-   * terhadap seluruh halaman aktif sampai:
-   * - callback project terdeteksi,
-   * - kembali ke origin project,
-   * - atau timeout.
+   * X_CONNECT_CDP_URL_ACCOUNT_1=http://127.0.0.1:9222
+   * X_CONNECT_CDP_URL_ACCOUNT_2=http://127.0.0.1:9224
+   *
+   * IMPORTANT:
+   *
+   * Tidak ada fallback ke X_CONNECT_CDP_URL global.
+   *
+   * Tujuannya supaya Account 2 tidak pernah secara tidak sengaja
+   * menggunakan session Account 1.
    */
   private async executeXConnect(
     task: PlannedTask,
@@ -268,27 +272,79 @@ export class TaskExecutor {
 
     console.log(`𝕏 [TaskExecutor] X_CONNECT → ${task.targetUrl}`);
 
-    const cdpUrl =
-      process.env.X_CONNECT_CDP_URL ?? process.env.X_CDP_URL ?? null;
+    console.log(
+      `👤 [TaskExecutor] X account scope → #${task.accountId} / ${task.accountName}`,
+    );
 
-    const storageStatePath = process.env.X_STORAGE_STATE_PATH ?? null;
+    const accountId = task.accountId;
 
+    if (!Number.isInteger(accountId) || accountId <= 0) {
+      throw new Error(
+        `Task ${task.planTaskId} memiliki accountId yang tidak valid.`,
+      );
+    }
+
+    /*
+     * ============================================================
+     * ACCOUNT-SPECIFIC X BROWSER SESSION
+     * ============================================================
+     */
+
+    const accountCdpEnvKey = `X_CONNECT_CDP_URL_ACCOUNT_${accountId}`;
+
+    const accountStorageEnvKey = `X_STORAGE_STATE_PATH_ACCOUNT_${accountId}`;
+
+    const cdpUrl = process.env[accountCdpEnvKey]?.trim() || null;
+
+    const storageStatePath = process.env[accountStorageEnvKey]?.trim() || null;
+
+    console.log(`🔐 [TaskExecutor] X session env → ${accountCdpEnvKey}`);
+
+    if (cdpUrl) {
+      console.log(`🌐 [TaskExecutor] X CDP account #${accountId} → ${cdpUrl}`);
+    }
+
+    if (storageStatePath) {
+      console.log(
+        `💾 [TaskExecutor] X storage state account #${accountId} → ${storageStatePath}`,
+      );
+    }
+
+    /*
+     * SAFETY GUARD
+     *
+     * Jangan pernah fallback ke global X_CONNECT_CDP_URL.
+     *
+     * Kalau Account 2 belum punya browser session,
+     * task harus berhenti di sini.
+     */
     if (!cdpUrl && !storageStatePath) {
       const output = JSON.stringify(
         {
           action: "X_CONNECT",
           status: "BLOCKED",
-          reason: "Browser session X belum dikonfigurasi.",
-          message:
-            "Set X_CONNECT_CDP_URL untuk memakai browser X yang sudah login, atau X_STORAGE_STATE_PATH untuk session storage.",
+          accountId,
           accountName: task.accountName,
           targetUrl: task.targetUrl,
+          reason: "ACCOUNT_X_SESSION_NOT_CONFIGURED",
+          requiredEnvironmentVariables: [
+            accountCdpEnvKey,
+            accountStorageEnvKey,
+          ],
+          message:
+            `Browser session X untuk account #${accountId} belum dikonfigurasi. ` +
+            `Task sengaja tidak menggunakan X_CONNECT_CDP_URL global ` +
+            `agar session account lain tidak ikut terpakai.`,
         },
         null,
         2,
       );
 
       this.taskManager.saveTaskProof(databaseTaskId, output);
+
+      console.log(
+        `🛑 [TaskExecutor] X_CONNECT BLOCKED: session account #${accountId} belum dikonfigurasi.`,
+      );
 
       return {
         output,
@@ -307,7 +363,9 @@ export class TaskExecutor {
     try {
       await browser.start();
 
-      console.log(`🌐 [TaskExecutor] X_CONNECT browser started.`);
+      console.log(
+        `🌐 [TaskExecutor] X_CONNECT browser started untuk account #${accountId}.`,
+      );
 
       const initialPages = browser.getOpenPages();
 
@@ -366,20 +424,12 @@ export class TaskExecutor {
         clicked = true;
       }
 
-      /**
-       * IMPORTANT:
-       *
+      /*
        * browser.open() dapat langsung mengikuti redirect:
        *
        * /auth/x/start
-       *        ↓
+       *      ↓
        * x.com/i/oauth2/authorize
-       *
-       * Dalam kondisi tersebut tidak ada tombol Connect
-       * yang perlu diklik lagi.
-       *
-       * Jadi OAuth URL X harus dianggap sebagai OAuth yang
-       * sudah dimulai dan executor wajib masuk polling.
        */
       const isXOAuthUrl =
         /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/i\/oauth2\/authorize/i.test(
@@ -390,6 +440,11 @@ export class TaskExecutor {
         console.log(
           `🔐 [TaskExecutor] X_CONNECT OAuth authorization page terdeteksi langsung.`,
         );
+
+        console.log(
+          `👤 [TaskExecutor] OAuth account scope → #${accountId} / ${task.accountName}`,
+        );
+
         console.log(
           `⏳ [TaskExecutor] X_CONNECT menunggu authorization manual dan callback project.`,
         );
@@ -404,6 +459,7 @@ export class TaskExecutor {
           {
             action: "X_CONNECT",
             status: "BLOCKED",
+            accountId,
             accountName: task.accountName,
             targetUrl: task.targetUrl,
             currentUrl,
@@ -429,26 +485,22 @@ export class TaskExecutor {
       let lastUrl = "";
 
       console.log(
-        `⏳ [TaskExecutor] X_CONNECT menunggu OAuth callback maksimal ${maxWaitMs / 1000}s...`,
+        `⏳ [TaskExecutor] X_CONNECT menunggu OAuth callback maksimal ${
+          maxWaitMs / 1000
+        }s...`,
       );
 
       while (Date.now() - startedWaitingAt < maxWaitMs) {
         const pages = browser.getOpenPages();
 
-        /**
-         * Periksa semua page, bukan hanya page terakhir.
-         *
-         * OAuth bisa saja membuka popup/tab baru.
-         */
         const candidatePages = pages.length > 0 ? pages : [page];
 
         for (const candidatePage of candidatePages) {
           try {
             const candidateUrl = candidatePage.url();
 
-            /**
-             * Callback URL adalah completion signal
-             * paling kuat.
+            /*
+             * Callback URL adalah completion signal paling kuat.
              */
             const isProjectCallback = /\/auth\/x\/callback(?:[/?#]|$)/i.test(
               candidateUrl,
@@ -456,6 +508,7 @@ export class TaskExecutor {
 
             if (isProjectCallback) {
               page = candidatePage;
+
               browser.usePage(candidatePage);
 
               const title = await page.title().catch(() => "");
@@ -473,6 +526,7 @@ export class TaskExecutor {
                 {
                   action: "X_CONNECT",
                   status: "CONNECTED",
+                  accountId,
                   accountName: task.accountName,
                   targetUrl: task.targetUrl,
                   callbackUrl: candidateUrl,
@@ -492,6 +546,10 @@ export class TaskExecutor {
                 `✅ [TaskExecutor] X_CONNECT OAuth callback terdeteksi.`,
               );
 
+              console.log(
+                `👤 [TaskExecutor] Connected account → #${accountId} / ${task.accountName}`,
+              );
+
               console.log(`🔗 [TaskExecutor] Callback URL: ${candidateUrl}`);
 
               return {
@@ -500,12 +558,11 @@ export class TaskExecutor {
               };
             }
 
-            /**
+            /*
              * Fallback:
              *
-             * Jika OAuth selesai dan project langsung redirect
-             * ke root/halaman project tanpa mempertahankan
-             * /auth/x/callback di URL.
+             * OAuth selesai dan project langsung redirect
+             * ke root/halaman project.
              */
             let targetOrigin: string | null = null;
             let currentOrigin: string | null = null;
@@ -525,15 +582,9 @@ export class TaskExecutor {
               !/\/auth\/x\/start/i.test(candidateUrl);
 
             if (returnedToProject) {
-              /**
-               * Jangan menganggap URL project langsung sebagai
-               * success jika kita bahkan belum masuk OAuth.
-               *
-               * Di sini success hanya dianggap valid apabila
-               * sebelumnya OAuth memang sudah dimulai.
-               */
               if (clicked || isXOAuthUrl) {
                 page = candidatePage;
+
                 browser.usePage(candidatePage);
 
                 const title = await page.title().catch(() => "");
@@ -551,6 +602,7 @@ export class TaskExecutor {
                   {
                     action: "X_CONNECT",
                     status: "CONNECTED",
+                    accountId,
                     accountName: task.accountName,
                     targetUrl: task.targetUrl,
                     currentUrl: candidateUrl,
@@ -571,6 +623,10 @@ export class TaskExecutor {
                   `✅ [TaskExecutor] X_CONNECT kembali ke domain project.`,
                 );
 
+                console.log(
+                  `👤 [TaskExecutor] Connected account → #${accountId} / ${task.accountName}`,
+                );
+
                 console.log(`🔗 [TaskExecutor] Project URL: ${candidateUrl}`);
 
                 return {
@@ -580,8 +636,8 @@ export class TaskExecutor {
               }
             }
 
-            /**
-             * Log perubahan URL dari page mana pun.
+            /*
+             * Log perubahan URL.
              */
             if (candidateUrl !== lastUrl) {
               console.log(
@@ -610,12 +666,9 @@ export class TaskExecutor {
           }
         }
 
-        /**
-         * Pastikan active page tetap hidup dan menunggu
-         * sedikit sebelum polling berikutnya.
-         */
         try {
           page = browser.getActivePage();
+
           browser.usePage(page);
 
           await page
@@ -638,12 +691,13 @@ export class TaskExecutor {
         {
           action: "X_CONNECT",
           status: "IN_PROGRESS",
+          accountId,
           accountName: task.accountName,
           targetUrl: task.targetUrl,
           currentUrl,
           title,
           message:
-            "OAuth belum selesai dalam waktu tunggu. Selesaikan authorization secara manual pada browser session lalu jalankan task X_CONNECT kembali.",
+            "OAuth belum selesai dalam waktu tunggu. Selesaikan authorization secara manual pada browser session account ini lalu jalankan task X_CONNECT kembali.",
           callbackDetected: false,
           timeoutMs: maxWaitMs,
         },
@@ -660,15 +714,12 @@ export class TaskExecutor {
         status: "IN_PROGRESS",
       };
     } finally {
-      /**
+      /*
        * Jangan close browser CDP external milik user.
-       *
-       * BrowserExecutor.close() dapat menutup context CDP,
-       * sehingga external X browser sengaja tidak ditutup.
        */
       if (cdpUrl) {
         console.log(
-          `🌐 [TaskExecutor] X_CONNECT menggunakan external CDP browser; browser tidak ditutup.`,
+          `🌐 [TaskExecutor] X_CONNECT menggunakan external CDP browser account #${accountId}; browser tidak ditutup.`,
         );
       } else {
         await browser.close();
