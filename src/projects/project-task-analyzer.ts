@@ -7,11 +7,110 @@ export interface ProjectTaskAnalyzerOptions {
   llm: LLMProvider;
 }
 
+interface TaskEvidence {
+  kind: "ACTION" | "FORM" | "CONTEXT";
+  description: string;
+  sourceQuote: string;
+
+  actionType?: string;
+
+  targetUrl?: string | null;
+
+  targetKind?:
+    | "X_PROFILE"
+    | "X_STATUS"
+    | "X_INTENT"
+    | "WEBSITE"
+    | "GOOGLE_FORM"
+    | "UNKNOWN";
+
+  producesOwnTweetUrl?: boolean;
+  requiresOwnTweetUrl?: boolean;
+
+  walletInteraction?: "NONE" | "CONNECT" | "SIGN" | "APPROVE" | "UNKNOWN";
+
+  form?: {
+    formType?: "WEBSITE" | "GOOGLE_FORM";
+    targetUrl?: string;
+
+    fields?: Array<{
+      type?: string;
+      label?: string;
+      required?: boolean;
+      value?: string | null;
+    }>;
+
+    checkboxes?: Array<{
+      type?: string;
+      label?: string;
+      required?: boolean;
+      checked?: boolean;
+    }>;
+  };
+}
+
 interface AnalyzeProjectArgs {
   projectName: string;
   sourceUrl: string;
-  requirements: TaskRequirement[];
+  evidence: TaskEvidence[];
 }
+
+const X_TASK_TYPES = new Set([
+  "X_FOLLOW",
+  "X_LIKE",
+  "X_REPOST",
+  "X_COMMENT",
+  "X_REPLY",
+  "X_QUOTE",
+  "X_POST",
+]);
+
+const X_POST_ACTION_TYPES = new Set([
+  "X_LIKE",
+  "X_REPOST",
+  "X_COMMENT",
+  "X_REPLY",
+  "X_QUOTE",
+]);
+
+const SUPPORTED_TASK_TYPES = new Set([
+  "OPEN_PAGE",
+  "X_FOLLOW",
+  "X_LIKE",
+  "X_REPOST",
+  "X_COMMENT",
+  "X_REPLY",
+  "X_QUOTE",
+  "X_POST",
+  "FORM",
+  "FORM_TWITTER",
+  "FORM_WALLET",
+  "FORM_SUBMIT",
+  "WHITELIST",
+  "CUSTOM",
+]);
+
+const SUPPORTED_FORM_FIELD_TYPES = new Set([
+  "TWITTER_HANDLE",
+  "WALLET_ADDRESS",
+  "OWN_TWEET_URL",
+  "PROOF_URL",
+  "TEXT",
+  "EMAIL",
+  "DISCORD",
+  "TELEGRAM",
+  "CUSTOM",
+]);
+
+const SUPPORTED_CHECKBOX_TYPES = new Set([
+  "X_FOLLOW",
+  "X_LIKE",
+  "X_REPOST",
+  "X_COMMENT",
+  "X_REPLY",
+  "X_QUOTE",
+  "CUSTOM",
+]);
 
 export class ProjectTaskAnalyzer {
   constructor(private readonly options: ProjectTaskAnalyzerOptions) {}
@@ -42,10 +141,12 @@ export class ProjectTaskAnalyzer {
     );
 
     const page = await this.options.browser.open(parsedUrl.toString());
-    const context = this.buildPageContext(page.text);
+
+    const context = this.buildPageContext(page.text, page.links, page.url);
 
     const result = await this.options.llm.generate({
       systemInstruction: this.buildSystemInstruction(),
+
       messages: [
         {
           role: "user",
@@ -56,6 +157,7 @@ export class ProjectTaskAnalyzer {
           ),
         },
       ],
+
       tools: [this.createAnalyzeTool()],
     });
 
@@ -64,72 +166,138 @@ export class ProjectTaskAnalyzer {
     return this.validateAndNormalizeResult(args, parsedUrl.toString());
   }
 
-  private buildPageContext(text: string): string {
-    const normalized = text
+  private buildPageContext(
+    text: string,
+    links: Array<{
+      text: string;
+      href: string;
+    }>,
+    currentUrl: string,
+  ): string {
+    const normalizedText = text
       .replace(/\r\n/g, "\n")
       .replace(/[ \t]+/g, " ")
       .trim();
 
-    const maxLength = 30_000;
+    const maxTextLength = 30_000;
 
-    if (normalized.length <= maxLength) {
-      return normalized;
+    const pageText =
+      normalizedText.length <= maxTextLength
+        ? normalizedText
+        : normalizedText.slice(0, maxTextLength);
+
+    if (normalizedText.length > maxTextLength) {
+      console.warn(
+        `⚠️ [ProjectTaskAnalyzer] Page text terlalu panjang. Dipotong ke ${maxTextLength} karakter.`,
+      );
     }
 
-    console.warn(
-      `⚠️ [ProjectTaskAnalyzer] Page text terlalu panjang. Dipotong ke ${maxLength} karakter.`,
+    const normalizedLinks = links
+      .map((link) => ({
+        text: String(link.text ?? "")
+          .replace(/\s+/g, " ")
+          .trim(),
+
+        href: String(link.href ?? "").trim(),
+      }))
+      .filter((link) => link.href);
+
+    const uniqueLinks = Array.from(
+      new Map(
+        normalizedLinks.map((link) => [`${link.text}\n${link.href}`, link]),
+      ).values(),
     );
 
-    return normalized.slice(0, maxLength);
+    const maxLinks = 500;
+
+    const linksForContext = uniqueLinks.slice(0, maxLinks);
+
+    const linkLines = linksForContext.map((link, index) => {
+      const label = link.text || "(no visible link text)";
+
+      return `${index + 1}. [${label}] ${link.href}`;
+    });
+
+    return [
+      `CURRENT PAGE URL:\n${currentUrl}`,
+      "",
+      "VISIBLE PAGE CONTENT:",
+      pageText,
+      "",
+      "DISCOVERED PAGE LINKS:",
+      linkLines.length > 0
+        ? linkLines.join("\n")
+        : "(No anchor links discovered.)",
+    ].join("\n");
   }
 
   private buildSystemInstruction(): string {
     return `
-You are a project task requirement analyzer for an agentic automation system.
+You are the evidence analyzer for an agentic project-task automation system.
 
-Your job is ONLY to inspect a project/quest/whitelist webpage and convert
-the visible requirements into a structured task plan.
+Your job is to inspect a project/quest/whitelist webpage and collect
+grounded evidence about what the user actually needs to accomplish.
 
-Do NOT execute any task.
+IMPORTANT ARCHITECTURE:
 
-Do NOT click anything.
+You do NOT directly produce final TaskRequirement semantics.
 
-Do NOT invent requirements that are not supported by the page.
+You produce intermediate TaskEvidence.
 
-The user will eventually want the agent to execute the requirements for
-multiple accounts.
+A deterministic normalization layer will convert your evidence into
+final TaskRequirement objects.
 
-Supported task types:
+Therefore:
 
-OPEN_PAGE
+- Be flexible when interpreting natural language.
+- Be conservative when evidence is missing.
+- Never invent URLs.
+- Never invent requirements.
+- Never turn general/background information into an actionable task.
+- Never assume that mentioning a wallet means the user must connect a wallet.
+- Never assume that mentioning X means an X task exists.
+- Never collapse multiple distinct actions into one action.
+- When evidence is insufficient, mark the relevant target or interpretation
+  as unresolved instead of guessing.
 
-X_FOLLOW
+EVIDENCE TYPES:
 
-X_LIKE
+ACTION
 
-X_REPOST
-
-X_COMMENT
-
-X_REPLY
-
-X_QUOTE
-
-X_POST
+A concrete action the user is instructed to perform.
 
 FORM
 
-FORM_TWITTER
+A concrete form/application submission requirement.
 
-FORM_WALLET
+CONTEXT
 
-FORM_SUBMIT
+Background information that helps explain the project but is NOT itself
+an actionable task.
 
+Only ACTION and FORM evidence will normally become executable tasks.
+
+SUPPORTED ACTION TYPES:
+
+OPEN_PAGE
+X_FOLLOW
+X_LIKE
+X_REPOST
+X_COMMENT
+X_REPLY
+X_QUOTE
+X_POST
 WHITELIST
-
 CUSTOM
 
-Supported form field types:
+SUPPORTED FORM TYPES:
+
+FORM
+FORM_TWITTER
+FORM_WALLET
+FORM_SUBMIT
+
+SUPPORTED FORM FIELD TYPES:
 
 TWITTER_HANDLE
 WALLET_ADDRESS
@@ -141,67 +309,220 @@ DISCORD
 TELEGRAM
 CUSTOM
 
-Rules:
+X SEMANTICS:
 
-1. Identify the project name from the page when possible.
+- "follow @name" => X_FOLLOW
+- "like this post" => X_LIKE
+- "retweet this post" => X_REPOST
+- "repost this post" => X_REPOST
+- "comment on this post" => X_COMMENT
+- "reply to this post" => X_REPLY
+- "quote this post" => X_QUOTE
+- "make/create/post a standalone post" => X_POST
 
-2. Identify every actionable requirement that is clearly visible.
+IMPORTANT:
 
-3. For X tasks, provide the actual target URL when it is available.
+If one sentence contains multiple distinct actions, create separate
+ACTION evidence entries.
 
-4. For website/form tasks, provide the relevant target URL.
+Example:
 
-5. Do not create one generic "complete everything" task if the page exposes
-   multiple distinct requirements.
+"Like, Retweet and comment on the pinned post"
 
-6. Preserve task order when the page implies an order.
+must become:
 
-7. If a requirement needs a wallet, classify it appropriately as
-   FORM_WALLET or another supported wallet-related task.
+1. X_LIKE
+2. X_REPOST
+3. X_COMMENT
 
-8. If a requirement is ambiguous, use CUSTOM instead of inventing details.
+Do NOT turn the whole sentence into X_REPLY.
 
-9. Do not create project-specific executor logic.
+Another example:
 
-10. Do not create CSS selectors unless they are explicitly needed later.
+"Like & Repost pinned post"
 
-11. Do not assume wallet connection timing. The executor will determine
-    whether wallet connection is needed before or during a later action.
+must become:
 
-12. targetUrl should point to the actual page relevant to the task whenever
-    that URL is known.
+1. X_LIKE
+2. X_REPOST
 
-13. Return only requirements that are actually supported by the inspected page.
+Do not collapse them.
 
-14. If a form explicitly asks the user to provide a proof/evidence URL,
-    classify that field as PROOF_URL.
+COMMENT VS REPLY:
 
-15. Use PROOF_URL specifically when the form expects a URL/link proving that
-    an action was completed, such as an X comment URL, X reply URL, X quote
-    URL, tweet URL, or other task completion evidence.
+If the project explicitly says "comment", use X_COMMENT.
 
-16. Do not invent a proof URL.
+If it explicitly says "reply", use X_REPLY.
 
-17. Leave the PROOF_URL field value empty/null when the actual proof URL is
-    not known yet. The existing TaskPlanner may populate it from the active
-    account's configured default proof URL.
+Do not reinterpret "comment" as X_REPLY merely because the X UI technically
+implements comments using replies.
 
-18. Do not confuse PROOF_URL with OWN_TWEET_URL. OWN_TWEET_URL is specifically
-    a URL produced by a task where the account creates its own tweet.
-    PROOF_URL is evidence/proof submitted to a form for a completed action.
+OWN TWEET URL:
 
-The result will be passed into an existing TaskPlanner which creates
-one task set per active account.
+X_COMMENT, X_REPLY and X_QUOTE do NOT automatically require an own tweet URL.
+
+Only mark requiresOwnTweetUrl when the page explicitly requires a URL of
+a previously-created standalone post owned by the account.
+
+Only X_POST can normally produce an own tweet URL.
+
+producesOwnTweetUrl must NOT be used for:
+
+- X_FOLLOW
+- X_LIKE
+- X_REPOST
+- X_COMMENT
+- X_REPLY
+- X_QUOTE
+
+X TARGETS:
+
+For X_FOLLOW:
+
+- Prefer an actual X profile URL.
+
+For post-level actions:
+
+- Prefer an exact discovered X status URL.
+- A normal status URL generally contains /status/.
+- Do not invent a status ID.
+- Do not convert a project homepage/application URL into an X target.
+- Do not use an X profile URL as the target of a post-level action.
+- An X intent URL may be recorded as evidence when it is explicitly
+  discovered, but do not manufacture one.
+
+If the page says "repost the pinned post" but no exact post URL is exposed:
+
+- Keep the ACTION evidence.
+- Do not invent a status URL.
+- Leave target unresolved.
+
+WALLET SEMANTICS:
+
+These are DIFFERENT:
+
+"submit your wallet address"
+"enter wallet address"
+"provide wallet address"
+
+=> wallet address form field only.
+
+These are actual wallet interactions:
+
+"connect wallet"
+"connect your wallet"
+"sign a message"
+"sign transaction"
+"approve transaction"
+"approve in wallet"
+
+Only classify wallet interaction when the page explicitly requires it.
+
+Background/context such as:
+
+"Connect your wallet to prepare for mint"
+
+does NOT automatically mean the whitelist application itself requires
+wallet connection.
+
+Always prioritize the actual actionable application instructions.
+
+FORM SEMANTICS:
+
+If the form asks for:
+
+- X username
+- wallet address
+- comment link
+- reply link
+- quote link
+- proof URL
+- evidence URL
+
+represent them as separate fields.
+
+Use PROOF_URL when the field is evidence proving completion of an action.
+
+Use OWN_TWEET_URL only for a standalone post created by the account.
+
+A WALLET_ADDRESS field alone does NOT imply FORM_WALLET.
+
+FORM_WALLET should only be used when there is explicit evidence of an
+actual wallet interaction.
+
+If the form only asks for a wallet address, use FORM or FORM_SUBMIT.
+
+EVIDENCE GROUNDING:
+
+Every ACTION or FORM evidence item must contain:
+
+- description
+- sourceQuote
+
+sourceQuote should be a short quote or faithful excerpt from the inspected
+page supporting the requirement.
+
+Do not create an evidence item merely because something seems common for
+NFT whitelist projects.
+
+For every target URL, use only URLs actually present in the inspected
+page context or the current page URL when it is genuinely the target.
+
+Do not invent URLs.
+
+CONTEXT:
+
+Use CONTEXT evidence for statements such as:
+
+- collection information
+- mint information
+- blockchain information
+- general explanations
+- background wallet information
+- announcements that do not instruct the user to perform an action
+
+Do not convert CONTEXT into executable tasks.
+
+ORDER:
+
+Preserve the order in which actionable requirements appear on the page
+when that order is reasonably clear.
+
+FLEXIBILITY:
+
+Different projects may express the same action differently.
+
+Examples:
+
+"Repost the pinned announcement"
+"RT the pinned tweet"
+"Retweet our latest post"
+
+These may all represent X_REPOST.
+
+Likewise:
+
+"Drop a comment"
+"Comment below"
+"Leave a comment on the pinned post"
+
+may represent X_COMMENT.
+
+Interpret language semantically, but only when supported by the page evidence.
+
+Do not write project-specific rules.
+
+Return evidence, not browser selectors and not executor logic.
 `.trim();
   }
 
   private buildUserPrompt(
     sourceUrl: string,
     title: string,
-    pageText: string,
+    pageContext: string,
   ): string {
     return `
-Analyze this project page.
+Analyze this project page and produce grounded intermediate TaskEvidence.
 
 SOURCE URL:
 
@@ -211,37 +532,112 @@ PAGE TITLE:
 
 ${title}
 
-VISIBLE PAGE CONTENT:
+PAGE INSPECTION CONTEXT:
 
-${pageText}
+${pageContext}
 
-Create the structured project task plan.
+IMPORTANT:
 
-Focus on WHAT the user needs to accomplish, not HOW the browser should
-click or interact with the page.
+Do NOT directly think in terms of the final TaskPlanner implementation.
 
-Pay special attention to forms asking for:
-- Twitter/X username
-- wallet address
-- tweet URL
-- reply/comment/quote proof URL
-- proof/evidence URL
-- social account information
-- other task completion evidence
+First identify the actual user-facing requirements from the page.
 
-If a form asks for proof/evidence as a URL, classify that field as PROOF_URL.
-Do not invent the proof URL value.
+For every actionable requirement:
+
+- create ACTION or FORM evidence
+- provide a short sourceQuote
+- provide the most specific verified target URL available
+- do not invent missing URLs
+
+For X actions:
+
+- Follow => X_FOLLOW
+- Like => X_LIKE
+- Retweet/Repost => X_REPOST
+- Comment => X_COMMENT
+- Reply => X_REPLY
+- Quote => X_QUOTE
+- Create standalone post => X_POST
+
+If one sentence contains multiple actions, split them.
+
+Example:
+
+"Like, Retweet and comment on the pinned post"
+
+must become three separate evidence items:
+
+X_LIKE
+X_REPOST
+X_COMMENT
+
+Example:
+
+"Like & Repost pinned post"
+
+must become:
+
+X_LIKE
+X_REPOST
+
+For post-level X actions, inspect DISCOVERED PAGE LINKS and prefer an exact
+/status/ URL when one exists.
+
+If no exact X post URL exists, DO NOT invent one.
+
+For X_FOLLOW, an X profile URL is valid.
+
+Do not use an X profile URL as the target for
+X_LIKE/X_REPOST/X_COMMENT/X_REPLY/X_QUOTE.
+
+WALLET:
+
+If the page says:
+
+"submit wallet address"
+
+that means WALLET_ADDRESS form field.
+
+It does NOT automatically mean wallet connection.
+
+Only mark actual wallet interaction when the page explicitly says:
+
+- connect wallet
+- connect your wallet
+- sign
+- approve
+
+Background explanations about wallets should be treated as CONTEXT.
+
+FORMS:
+
+Separate each field.
+
+Examples:
+
+X username => TWITTER_HANDLE
+wallet address => WALLET_ADDRESS
+comment/reply/quote proof => PROOF_URL
+standalone own post URL => OWN_TWEET_URL
+
+Do not invent proof values.
+
+Return only evidence supported by the inspected page.
 `.trim();
   }
 
   private createAnalyzeTool() {
     return {
-      name: "create_project_task_plan",
+      name: "create_project_task_evidence",
+
       description:
-        "Create a structured task plan from the inspected project page.",
+        "Create grounded intermediate task evidence from the inspected project page.",
+
       riskLevel: "SAFE" as const,
+
       parameters: {
         type: "object" as const,
+
         properties: {
           projectName: {
             type: "string" as const,
@@ -253,15 +649,34 @@ Do not invent the proof URL value.
             description: "Original project URL.",
           },
 
-          requirements: {
+          evidence: {
             type: "array" as const,
-            description: "Actionable project requirements in execution order.",
+
+            description:
+              "Intermediate evidence describing actionable requirements and relevant context.",
+
             items: {
               type: "object" as const,
+
               properties: {
-                type: {
+                kind: {
                   type: "string" as const,
-                  description: "Supported task type.",
+                  enum: ["ACTION", "FORM", "CONTEXT"],
+                },
+
+                description: {
+                  type: "string" as const,
+                  description: "Human-readable description of the evidence.",
+                },
+
+                sourceQuote: {
+                  type: "string" as const,
+                  description:
+                    "Short quote or faithful excerpt from the page supporting this evidence.",
+                },
+
+                actionType: {
+                  type: "string" as const,
                   enum: [
                     "OPEN_PAGE",
                     "X_FOLLOW",
@@ -271,42 +686,49 @@ Do not invent the proof URL value.
                     "X_REPLY",
                     "X_QUOTE",
                     "X_POST",
-                    "FORM",
-                    "FORM_TWITTER",
-                    "FORM_WALLET",
-                    "FORM_SUBMIT",
                     "WHITELIST",
                     "CUSTOM",
                   ],
                 },
 
-                description: {
-                  type: "string" as const,
-                  description: "Human-readable description of the requirement.",
-                },
-
                 targetUrl: {
                   type: "string" as const,
                   description:
-                    "URL relevant to this specific requirement, if known.",
+                    "Verified target URL discovered from the page, if available.",
+                },
+
+                targetKind: {
+                  type: "string" as const,
+                  enum: [
+                    "X_PROFILE",
+                    "X_STATUS",
+                    "X_INTENT",
+                    "WEBSITE",
+                    "GOOGLE_FORM",
+                    "UNKNOWN",
+                  ],
                 },
 
                 producesOwnTweetUrl: {
                   type: "boolean" as const,
                   description:
-                    "Whether this task produces a URL of a tweet created by the account.",
+                    "True only when this action creates a standalone X post.",
                 },
 
                 requiresOwnTweetUrl: {
                   type: "boolean" as const,
                   description:
-                    "Whether this task requires a previously created own tweet URL.",
+                    "True only when this requirement explicitly needs a previously created standalone X post URL.",
+                },
+
+                walletInteraction: {
+                  type: "string" as const,
+                  enum: ["NONE", "CONNECT", "SIGN", "APPROVE", "UNKNOWN"],
                 },
 
                 form: {
                   type: "object" as const,
-                  description:
-                    "Optional form information when the requirement is a form task.",
+
                   properties: {
                     formType: {
                       type: "string" as const,
@@ -319,8 +741,10 @@ Do not invent the proof URL value.
 
                     fields: {
                       type: "array" as const,
+
                       items: {
                         type: "object" as const,
+
                         properties: {
                           type: {
                             type: "string" as const,
@@ -356,8 +780,10 @@ Do not invent the proof URL value.
 
                     checkboxes: {
                       type: "array" as const,
+
                       items: {
                         type: "object" as const,
+
                         properties: {
                           type: {
                             type: "string" as const,
@@ -394,12 +820,12 @@ Do not invent the proof URL value.
                 },
               },
 
-              required: ["type", "description"],
+              required: ["kind", "description", "sourceQuote"],
             },
           },
         },
 
-        required: ["projectName", "sourceUrl", "requirements"],
+        required: ["projectName", "sourceUrl", "evidence"],
       },
 
       async execute() {
@@ -412,103 +838,603 @@ Do not invent the proof URL value.
 
   private extractToolArguments(result: LLMGenerateResult): AnalyzeProjectArgs {
     const toolCall = result.toolCalls?.find(
-      (call) => call.name === "create_project_task_plan",
+      (call) => call.name === "create_project_task_evidence",
     );
 
     if (!toolCall) {
       throw new Error(
-        "Gemini tidak menghasilkan project task plan yang terstruktur.",
+        "Gemini tidak menghasilkan project task evidence yang terstruktur.",
       );
     }
 
     return toolCall.args as AnalyzeProjectArgs;
   }
 
-  private validateAndNormalizeResult(
+  /*
+   * Public static entry point.
+   *
+   * Dipakai oleh create-project-task-plan.tool.ts
+   * ketika LLM sudah menghasilkan evidence.
+   *
+   * Tidak membuka browser dan tidak memanggil LLM lagi.
+   */
+  static normalizeEvidenceToTaskPlannerInput(
     args: AnalyzeProjectArgs,
-    sourceUrl: string,
   ): TaskPlannerInput {
     const projectName = String(args.projectName ?? "").trim();
+
+    const sourceUrl = String(args.sourceUrl ?? "").trim();
 
     if (!projectName) {
       throw new Error("Project analyzer menghasilkan projectName kosong.");
     }
 
-    if (!Array.isArray(args.requirements) || args.requirements.length === 0) {
+    if (!sourceUrl) {
+      throw new Error("Project analyzer menghasilkan sourceUrl kosong.");
+    }
+
+    if (!Array.isArray(args.evidence) || args.evidence.length === 0) {
       throw new Error(
-        "Project analyzer tidak menemukan requirement task yang valid.",
+        "Project analyzer tidak menghasilkan evidence yang valid.",
       );
     }
 
-    const requirements: TaskRequirement[] = args.requirements.map(
-      (requirement, index) => {
-        if (!requirement || typeof requirement !== "object") {
-          throw new Error(`Requirement #${index + 1} tidak valid.`);
+    const requirements: TaskRequirement[] = [];
+
+    /*
+     * Kita pakai helper instance-less.
+     *
+     * Semua method normalisasi di bawah ini
+     * tidak bergantung pada browser atau LLM.
+     */
+    const normalizer = Object.create(
+      ProjectTaskAnalyzer.prototype,
+    ) as ProjectTaskAnalyzer;
+
+    for (let index = 0; index < args.evidence.length; index += 1) {
+      const evidence = args.evidence[index];
+
+      if (!evidence || typeof evidence !== "object") {
+        throw new Error(`Evidence #${index + 1} tidak valid.`);
+      }
+
+      const kind = String(evidence.kind ?? "")
+        .trim()
+        .toUpperCase();
+
+      if (!["ACTION", "FORM", "CONTEXT"].includes(kind)) {
+        throw new Error(
+          `Evidence #${index + 1} memiliki kind yang tidak valid: "${kind}".`,
+        );
+      }
+
+      const description = String(evidence.description ?? "").trim();
+
+      const sourceQuote = String(evidence.sourceQuote ?? "").trim();
+
+      if (!description) {
+        throw new Error(`Evidence #${index + 1} tidak memiliki description.`);
+      }
+
+      if (!sourceQuote) {
+        throw new Error(`Evidence #${index + 1} tidak memiliki sourceQuote.`);
+      }
+
+      if (kind === "CONTEXT") {
+        continue;
+      }
+
+      if (kind === "FORM") {
+        const requirement = normalizer.normalizeFormEvidence(
+          evidence,
+          sourceUrl,
+        );
+
+        if (requirement) {
+          requirements.push(requirement);
         }
 
-        const type = String(requirement.type ?? "").trim();
+        continue;
+      }
 
-        if (!type) {
-          throw new Error(
-            `Requirement #${index + 1} tidak memiliki task type.`,
-          );
-        }
+      const normalizedActions = normalizer.normalizeActionEvidence(
+        evidence,
+        sourceUrl,
+      );
 
-        const description = String(requirement.description ?? "").trim();
+      requirements.push(...normalizedActions);
+    }
 
-        if (!description) {
-          throw new Error(
-            `Requirement #${index + 1} tidak memiliki description.`,
-          );
-        }
-
-        return {
-          type: type as TaskRequirement["type"],
-          description,
-
-          targetUrl:
-            typeof requirement.targetUrl === "string"
-              ? requirement.targetUrl.trim() || null
-              : null,
-
-          producesOwnTweetUrl: requirement.producesOwnTweetUrl ?? false,
-
-          requiresOwnTweetUrl: requirement.requiresOwnTweetUrl ?? false,
-
-          form: requirement.form
-            ? {
-                formType: requirement.form.formType,
-
-                targetUrl: String(requirement.form.targetUrl ?? "").trim(),
-
-                fields: (requirement.form.fields ?? []).map((field) => ({
-                  type: field.type,
-                  label: field.label?.trim(),
-                  required: field.required ?? true,
-                  value:
-                    typeof field.value === "string" ? field.value.trim() : null,
-                })),
-
-                checkboxes: (requirement.form.checkboxes ?? []).map(
-                  (checkbox) => ({
-                    type: checkbox.type,
-                    label: checkbox.label?.trim(),
-                    required: checkbox.required ?? false,
-                    checked: checkbox.checked ?? true,
-                  }),
-                ),
-
-                submit: undefined,
-              }
-            : undefined,
-        };
-      },
-    );
+    if (requirements.length === 0) {
+      throw new Error(
+        "Project analyzer tidak menemukan actionable task yang cukup jelas.",
+      );
+    }
 
     return {
       projectName,
       sourceUrl,
       requirements,
     };
+  }
+
+  private validateAndNormalizeResult(
+    args: AnalyzeProjectArgs,
+    sourceUrl: string,
+  ): TaskPlannerInput {
+    return ProjectTaskAnalyzer.normalizeEvidenceToTaskPlannerInput({
+      ...args,
+      sourceUrl,
+    });
+  }
+
+  private normalizeActionEvidence(
+    evidence: TaskEvidence,
+    sourceUrl: string,
+  ): TaskRequirement[] {
+    const description = evidence.description.trim();
+
+    const detectedActions = this.detectXActions(
+      description,
+      evidence.actionType,
+    );
+
+    if (detectedActions.length > 0) {
+      return detectedActions.map((type) =>
+        this.buildXRequirement(type, evidence, sourceUrl),
+      );
+    }
+
+    const rawType = String(evidence.actionType ?? "CUSTOM")
+      .trim()
+      .toUpperCase();
+
+    const type = SUPPORTED_TASK_TYPES.has(rawType) ? rawType : "CUSTOM";
+
+    const targetUrl = this.normalizeGenericTargetUrl(
+      evidence.targetUrl,
+      sourceUrl,
+    );
+
+    return [
+      {
+        type: type as TaskRequirement["type"],
+
+        description,
+
+        targetUrl,
+
+        producesOwnTweetUrl:
+          type === "X_POST" && evidence.producesOwnTweetUrl === true,
+
+        requiresOwnTweetUrl:
+          type !== "X_COMMENT" &&
+          type !== "X_REPLY" &&
+          type !== "X_QUOTE" &&
+          evidence.requiresOwnTweetUrl === true,
+
+        form: undefined,
+      },
+    ];
+  }
+
+  private buildXRequirement(
+    type: string,
+    evidence: TaskEvidence,
+    sourceUrl: string,
+  ): TaskRequirement {
+    const normalizedType = type as TaskRequirement["type"];
+
+    const targetUrl = this.normalizeXTargetUrl(
+      normalizedType,
+      evidence.targetUrl,
+    );
+
+    const isCommentLike =
+      normalizedType === "X_COMMENT" ||
+      normalizedType === "X_REPLY" ||
+      normalizedType === "X_QUOTE";
+
+    return {
+      type: normalizedType,
+
+      description: evidence.description.trim(),
+
+      targetUrl,
+
+      producesOwnTweetUrl:
+        normalizedType === "X_POST" && evidence.producesOwnTweetUrl === true,
+
+      requiresOwnTweetUrl:
+        !isCommentLike && evidence.requiresOwnTweetUrl === true,
+
+      form: undefined,
+    };
+  }
+
+  private normalizeFormEvidence(
+    evidence: TaskEvidence,
+    sourceUrl: string,
+  ): TaskRequirement | null {
+    const form = evidence.form;
+
+    if (!form) {
+      return {
+        type: "FORM_SUBMIT",
+
+        description: evidence.description.trim(),
+
+        targetUrl: evidence.targetUrl?.trim() || sourceUrl,
+
+        producesOwnTweetUrl: false,
+
+        requiresOwnTweetUrl: false,
+
+        form: undefined,
+      };
+    }
+
+    const fields = (form.fields ?? []).map((field) => {
+      const rawType = String(field.type ?? "")
+        .trim()
+        .toUpperCase();
+
+      const type = SUPPORTED_FORM_FIELD_TYPES.has(rawType) ? rawType : "CUSTOM";
+
+      return {
+        type: type as any,
+
+        label: field.label?.trim(),
+
+        required: field.required ?? true,
+
+        value: typeof field.value === "string" ? field.value.trim() : null,
+      };
+    });
+
+    const checkboxes = (form.checkboxes ?? []).map((checkbox) => {
+      const rawType = String(checkbox.type ?? "")
+        .trim()
+        .toUpperCase();
+
+      const type = SUPPORTED_CHECKBOX_TYPES.has(rawType) ? rawType : "CUSTOM";
+
+      return {
+        type: type as any,
+
+        label: checkbox.label?.trim(),
+
+        required: checkbox.required ?? false,
+
+        checked: checkbox.checked ?? true,
+      };
+    });
+
+    const walletInteraction = evidence.walletInteraction ?? "UNKNOWN";
+
+    const hasWalletAddressField = fields.some(
+      (field) => field.type === "WALLET_ADDRESS",
+    );
+
+    /*
+     * WALLET_ADDRESS != wallet connection.
+     */
+    const requiresWalletInteraction =
+      walletInteraction === "CONNECT" ||
+      walletInteraction === "SIGN" ||
+      walletInteraction === "APPROVE";
+
+    let taskType: "FORM" | "FORM_TWITTER" | "FORM_WALLET" | "FORM_SUBMIT" =
+      "FORM";
+
+    if (requiresWalletInteraction) {
+      taskType = "FORM_WALLET";
+    } else if (hasWalletAddressField && !requiresWalletInteraction) {
+      taskType = "FORM_SUBMIT";
+    } else {
+      taskType = "FORM_SUBMIT";
+    }
+
+    const formType =
+      form.formType === "GOOGLE_FORM" ? "GOOGLE_FORM" : "WEBSITE";
+
+    const targetUrl =
+      form.targetUrl?.trim() || evidence.targetUrl?.trim() || sourceUrl;
+
+    return {
+      type: taskType,
+
+      description: evidence.description.trim(),
+
+      targetUrl,
+
+      producesOwnTweetUrl: false,
+
+      requiresOwnTweetUrl: fields.some(
+        (field) => field.type === "OWN_TWEET_URL",
+      ),
+
+      form: {
+        formType,
+
+        targetUrl,
+
+        fields,
+
+        checkboxes,
+
+        submit: undefined,
+      },
+    };
+  }
+
+  private detectXActions(description: string, hintedType?: string): string[] {
+    const lower = description.toLowerCase();
+
+    const candidates: Array<{
+      type: string;
+      index: number;
+      priority: number;
+    }> = [];
+
+    const patterns: Array<{
+      type: string;
+      regex: RegExp;
+      priority: number;
+    }> = [
+      {
+        type: "X_FOLLOW",
+        regex: /\bfollow\b/,
+        priority: 1,
+      },
+
+      {
+        type: "X_LIKE",
+        regex: /\blike\b/,
+        priority: 2,
+      },
+
+      {
+        type: "X_REPOST",
+        regex: /\b(retweet|repost|rt)\b/,
+        priority: 3,
+      },
+
+      {
+        type: "X_COMMENT",
+        regex: /\bcomment\b/,
+        priority: 4,
+      },
+
+      {
+        type: "X_REPLY",
+        regex: /\breply\b/,
+        priority: 5,
+      },
+
+      {
+        type: "X_QUOTE",
+        regex: /\bquote\b/,
+        priority: 6,
+      },
+    ];
+
+    for (const pattern of patterns) {
+      const match = lower.match(pattern.regex);
+
+      if (match?.index !== undefined) {
+        candidates.push({
+          type: pattern.type,
+
+          index: match.index,
+
+          priority: pattern.priority,
+        });
+      }
+    }
+
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => {
+        if (a.index !== b.index) {
+          return a.index - b.index;
+        }
+
+        return a.priority - b.priority;
+      });
+
+      const hinted = String(hintedType ?? "")
+        .trim()
+        .toUpperCase();
+
+      const hintedIsX = X_TASK_TYPES.has(hinted);
+
+      if (hintedIsX || this.looksLikeSocialRequirement(lower)) {
+        return candidates.map((candidate) => candidate.type);
+      }
+    }
+
+    if (hintedType && X_TASK_TYPES.has(hintedType.trim().toUpperCase())) {
+      return [hintedType.trim().toUpperCase()];
+    }
+
+    return [];
+  }
+
+  private looksLikeSocialRequirement(text: string): boolean {
+    return /\b(on x|on twitter|x\.com|twitter\.com|tweet|post|pinned post|pinned tweet)\b/i.test(
+      text,
+    );
+  }
+
+  private normalizeXTargetUrl(
+    type: TaskRequirement["type"],
+    targetUrl?: string | null,
+  ): string | null {
+    const raw = String(targetUrl ?? "").trim();
+
+    if (!raw) {
+      return null;
+    }
+
+    let parsed: URL;
+
+    try {
+      parsed = new URL(raw);
+    } catch {
+      return null;
+    }
+
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+
+    const isXHost =
+      hostname === "x.com" ||
+      hostname === "twitter.com" ||
+      hostname === "mobile.twitter.com";
+
+    if (!isXHost) {
+      return null;
+    }
+
+    /*
+     * X_FOLLOW
+     *
+     * Bisa berupa:
+     *   https://x.com/arcroulette
+     *   https://x.com/intent/follow?screen_name=arcroulette
+     *
+     * Keduanya adalah target yang verified dari halaman.
+     */
+    if (type === "X_FOLLOW") {
+      if (this.isXProfileUrl(parsed)) {
+        return parsed.toString();
+      }
+
+      if (
+        parsed.pathname === "/intent/follow" &&
+        parsed.searchParams.has("screen_name")
+      ) {
+        return parsed.toString();
+      }
+
+      return null;
+    }
+
+    /*
+     * Post-level X actions.
+     *
+     * Prioritas:
+     *
+     * 1. Exact /status/ URL
+     * 2. Verified X intent URL
+     *
+     * Kita TIDAK mengubah intent URL menjadi
+     * /status/ secara paksa karena intent URL
+     * yang ada belum tentu memberi canonical URL
+     * lengkap tanpa melakukan lookup tambahan.
+     */
+    if (
+      type === "X_LIKE" ||
+      type === "X_REPOST" ||
+      type === "X_COMMENT" ||
+      type === "X_REPLY" ||
+      type === "X_QUOTE"
+    ) {
+      if (this.isXStatusUrl(parsed)) {
+        return parsed.toString();
+      }
+
+      /*
+       * Like:
+       * https://x.com/intent/like?tweet_id=123
+       */
+      if (
+        parsed.pathname === "/intent/like" &&
+        parsed.searchParams.has("tweet_id")
+      ) {
+        return parsed.toString();
+      }
+
+      /*
+       * Repost:
+       * https://x.com/intent/retweet?tweet_id=123
+       */
+      if (
+        parsed.pathname === "/intent/retweet" &&
+        parsed.searchParams.has("tweet_id")
+      ) {
+        return parsed.toString();
+      }
+
+      /*
+       * Reply:
+       * https://x.com/intent/tweet?in_reply_to=123
+       */
+      if (
+        parsed.pathname === "/intent/tweet" &&
+        parsed.searchParams.has("in_reply_to")
+      ) {
+        return parsed.toString();
+      }
+
+      return null;
+    }
+
+    /*
+     * X_POST
+     *
+     * Untuk standalone post, target URL
+     * memang bisa berupa URL X yang diberikan
+     * sebagai bagian requirement.
+     */
+    if (type === "X_POST") {
+      return parsed.toString();
+    }
+
+    return null;
+  }
+
+  private isXStatusUrl(url: URL): boolean {
+    return /\/status\/\d+/i.test(url.pathname);
+  }
+
+  private isXProfileUrl(url: URL): boolean {
+    const pathname = url.pathname.replace(/^\/+/, "").replace(/\/+$/, "");
+
+    if (!pathname) {
+      return false;
+    }
+
+    if (pathname.includes("/status/")) {
+      return false;
+    }
+
+    if (pathname.startsWith("intent/")) {
+      return false;
+    }
+
+    return pathname.split("/").length === 1;
+  }
+
+  private normalizeGenericTargetUrl(
+    targetUrl: string | null | undefined,
+    sourceUrl: string,
+  ): string | null {
+    const raw = String(targetUrl ?? "").trim();
+
+    if (!raw) {
+      return sourceUrl;
+    }
+
+    try {
+      const parsed = new URL(raw);
+
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return sourceUrl;
+      }
+
+      return parsed.toString();
+    } catch {
+      return sourceUrl;
+    }
   }
 }

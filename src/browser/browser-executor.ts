@@ -7,15 +7,23 @@ export interface BrowserExecutorOptions {
   connectOverCDPUrl?: string;
 }
 
+export interface BrowserPageLink {
+  text: string;
+  href: string;
+}
+
 export interface BrowserPageResult {
   url: string;
   title: string;
   text: string;
+  links: BrowserPageLink[];
 }
 
 export class BrowserExecutor {
   private browser: Browser | null = null;
+
   private context: BrowserContext | null = null;
+
   private page: Page | null = null;
 
   constructor(private readonly options: BrowserExecutorOptions = {}) {
@@ -79,16 +87,46 @@ export class BrowserExecutor {
       waitUntil: "domcontentloaded",
     });
 
-    return this.getPageResult();
+    return await this.getPageResult();
   }
 
   async getPageResult(): Promise<BrowserPageResult> {
     const page = this.getPage();
 
+    const links = await page.locator("a[href]").evaluateAll((elements) =>
+      elements
+        .map((element) => {
+          const anchor = element as unknown as {
+            innerText?: string;
+            textContent?: string;
+            href?: string;
+          };
+
+          const text = (anchor.innerText || anchor.textContent || "")
+            .replace(/\s+/g, " ")
+            .trim();
+
+          const href = anchor.href?.trim() ?? "";
+
+          return {
+            text,
+            href,
+          };
+        })
+        .filter((link) => link.href),
+    );
+
+    const uniqueLinks = Array.from(
+      new Map(
+        links.map((link) => [`${link.text}\n${link.href}`, link]),
+      ).values(),
+    );
+
     return {
       url: page.url(),
       title: await page.title(),
       text: await page.locator("body").innerText(),
+      links: uniqueLinks,
     };
   }
 

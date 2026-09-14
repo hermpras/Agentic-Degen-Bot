@@ -1,53 +1,33 @@
 import { LLMProvider } from "../providers/llm.interface.js";
-
 import { MemoryManager } from "../memory/memory-manager.js";
-
 import { Agent } from "../agent/agent.js";
-
 import { ToolRegistry } from "../tools/tool-registry.js";
-
 import { ApprovalManager } from "../approval/approval-manager.js";
-
 import { AgentDatabase } from "../database/agent-database.js";
+import { BrowserExecutor } from "../browser/browser-executor.js";
 
 import { getCurrentTimeTool } from "../tools/impl/get-current-time.tool.js";
-
 import { webSearchTool } from "../tools/impl/web-search.tool.js";
-
 import { readFileTool } from "../tools/impl/read-file.tool.js";
-
 import { writeFileTool } from "../tools/impl/write-file.tool.js";
-
 import { browsePageTool } from "../tools/impl/browse-page.tool.js";
-
 import { githubReadFileTool } from "../tools/impl/github-read-file.tool.js";
-
 import { githubListDirectoryTool } from "../tools/impl/github-list-directory.tool.js";
-
 import { githubGetRecentCommitsTool } from "../tools/impl/github-get-recent-commits.tool.js";
-
 import { githubGetWorkflowStatusTool } from "../tools/impl/github-get-workflow-status.tool.js";
 
 import { createAccountTool } from "../tools/impl/create-account.tool.js";
-
 import { listAccountsTool } from "../tools/impl/list-accounts.tool.js";
-
 import { updateAccountTool } from "../tools/impl/update-account.tool.js";
-
 import { renameAccountTool } from "../tools/impl/rename-account.tool.js";
 
 import { createProjectTool } from "../tools/impl/create-project.tool.js";
-
 import { listProjectsTool } from "../tools/impl/list-projects.tool.js";
-
 import { addToWatchlistTool } from "../tools/impl/add-to-watchlist.tool.js";
-
 import { updateProjectTool } from "../tools/impl/update-project.tool.js";
-
 import { updateWatchlistTool } from "../tools/impl/update-watchlist.tool.js";
 
 import { createProjectTaskPlanTool } from "../tools/impl/create-project-task-plan.tool.js";
-
 import { executeProjectTaskPlanTool } from "../tools/impl/execute-project-task-plan.tool.js";
 
 export interface AgentProfile {
@@ -82,11 +62,27 @@ export interface AgentProfile {
  * - tool registry sendiri
  * - approval manager sendiri
  */
-export function buildAgentProfiles(
+export async function buildAgentProfiles(
   provider: LLMProvider,
   memoryManager: MemoryManager,
   database: AgentDatabase,
-): AgentProfile[] {
+): Promise<AgentProfile[]> {
+  // ============================================================
+  // Browser
+  // ============================================================
+
+  /*
+   * BrowserExecutor dipakai oleh ProjectTaskAnalyzer untuk membaca
+   * halaman project secara langsung sebelum membuat task plan.
+   *
+   * Browser ini berbeda fungsi dengan browse_page tool:
+   *
+   * - browse_page -> tool yang bisa dipanggil Agent untuk browsing umum.
+   * - browserExecutor -> dependency internal analyzer.
+   */
+  const browser = new BrowserExecutor();
+  await browser.start();
+
   // ============================================================
   // General Agent
   // ============================================================
@@ -99,6 +95,7 @@ export function buildAgentProfiles(
 
   const generalAgent = new Agent(provider, generalTools, {
     memoryManager,
+
     systemInstruction:
       "Kamu adalah Degen Agent AI - General/Research Agent. " +
       "Kamu bantu riset Web3, cari info terkini, dan ngobrol santai " +
@@ -149,15 +146,21 @@ export function buildAgentProfiles(
   // ============================================================
 
   /**
-   * Tool ini hanya membuat task plan.
+   * Tool ini sekarang TIDAK menerima evidence dari main Agent.
    *
-   * Tool TIDAK mengeksekusi task.
+   * create_project_task_plan akan:
    *
-   * Hasil penting dari tool ini adalah planId.
-   * planId harus dipertahankan dan digunakan untuk execution
-   * terhadap plan yang sama.
+   * 1. menerima projectName + sourceUrl
+   * 2. menjalankan ProjectTaskAnalyzer
+   * 3. analyzer membaca halaman menggunakan BrowserExecutor
+   * 4. analyzer menghasilkan grounded TaskEvidence
+   * 5. evidence dinormalisasi secara deterministic
+   * 6. TaskPlanner membuat plan
+   * 7. plan disimpan ke database
+   *
+   * Jadi main Agent tidak bisa mengarang evidence sendiri.
    */
-  devTools.register(createProjectTaskPlanTool(database));
+  devTools.register(createProjectTaskPlanTool(database, browser, provider));
 
   /**
    * Tool ini mengeksekusi task plan yang sudah tersimpan.
@@ -172,6 +175,7 @@ export function buildAgentProfiles(
 
   const devAgent = new Agent(provider, devTools, {
     memoryManager,
+
     systemInstruction:
       "Kamu adalah Degen Agent AI - Dev & HoodBear Agent. " +
       "Kamu bantu debugging code, baca repository GitHub, " +
@@ -187,8 +191,11 @@ export function buildAgentProfiles(
       // ==========================================================
 
       "Untuk pekerjaan whitelist atau project, gunakan " +
-      "create_project_task_plan untuk membuat task plan " +
-      "berdasarkan requirements dan ACTIVE accounts yang tersedia. " +
+      "create_project_task_plan untuk menganalisis source URL " +
+      "dan membuat task plan berdasarkan requirement yang benar-benar " +
+      "ditemukan dari halaman project dan ACTIVE accounts yang tersedia. " +
+      "Jangan membuat atau mengirim evidence requirement secara manual " +
+      "ke tool tersebut. " +
       "create_project_task_plan HANYA membuat dan menyimpan task plan. " +
       "Tool tersebut TIDAK mengeksekusi task. " +
       "Setiap task plan yang berhasil dibuat memiliki planId. " +
@@ -299,20 +306,24 @@ export function buildAgentProfiles(
   return [
     {
       name: "general",
+
       description:
         "Untuk riset Web3 umum, cari info/berita terkini, ngobrol santai, " +
         "atau pertanyaan yang tidak spesifik soal development/HoodBear.",
+
       agent: generalAgent,
       approvalManager: generalTools.getApprovalManager(),
     },
 
     {
       name: "dev_hoodbear",
+
       description:
         "Untuk debugging code, baca/tulis file lokal, cek GitHub, " +
         "mengelola account whitelist, mengelola project/watchlist, " +
         "membuat task plan whitelist/project, dan menjalankan task " +
         "yang memerlukan approval user.",
+
       agent: devAgent,
       approvalManager: devTools.getApprovalManager(),
     },

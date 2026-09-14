@@ -1,13 +1,18 @@
 import { chromium } from "playwright";
+
 import { Tool } from "../tool.interface.js";
 
 export const browsePageTool: Tool = {
   name: "browse_page",
+
   description:
-    "Membuka dan membaca isi lengkap dari sebuah URL halaman web publik (Read-Only) menggunakan headless browser Chromium. Sangat berguna untuk situs web berbasis JavaScript / Single Page Application (SPA) yang membutuhkan rendering halaman.",
+    "Membuka dan membaca isi lengkap dari sebuah URL halaman web publik (Read-Only) menggunakan headless browser Chromium. Sangat berguna untuk situs web berbasis JavaScript / Single Page Application (SPA) yang membutuhkan rendering halaman. Selain teks halaman, tool juga mengembalikan daftar link yang ditemukan di halaman agar agent dapat menemukan URL tujuan seperti link X/Twitter, form, atau halaman terkait.",
+
   riskLevel: "SAFE",
+
   parameters: {
     type: "object",
+
     properties: {
       url: {
         type: "string",
@@ -15,8 +20,10 @@ export const browsePageTool: Tool = {
           'URL lengkap halaman web yang akan dibuka (contoh: "https://example.com" atau "https://hoodbear.site")',
       },
     },
+
     required: ["url"],
   },
+
   async execute(args: Record<string, any>) {
     const rawUrl = args.url;
 
@@ -46,7 +53,11 @@ export const browsePageTool: Tool = {
       const context = await browser.newContext({
         userAgent:
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        viewport: { width: 1280, height: 800 },
+
+        viewport: {
+          width: 1280,
+          height: 800,
+        },
       });
 
       const page = await context.newPage();
@@ -57,7 +68,9 @@ export const browsePageTool: Tool = {
       });
 
       try {
-        await page.waitForLoadState("networkidle", { timeout: 3000 });
+        await page.waitForLoadState("networkidle", {
+          timeout: 3000,
+        });
       } catch (e) {
         // Ignored: fallback untuk halaman SPA dengan websocket / polling aktif
       }
@@ -72,7 +85,49 @@ export const browsePageTool: Tool = {
         .filter((line: string) => line.length > 0)
         .join("\n");
 
+      /**
+       * Ambil semua anchor/link yang tersedia di halaman.
+       *
+       * Kita tidak menggunakan HTMLAnchorElement karena project ini
+       * menggunakan TypeScript tanpa DOM typings.
+       */
+      const links = await page.locator("a[href]").evaluateAll((elements) =>
+        elements
+          .map((element) => {
+            const anchor = element as unknown as {
+              innerText?: string;
+              textContent?: string;
+              href?: string;
+            };
+
+            const text = (anchor.innerText || anchor.textContent || "")
+              .replace(/\s+/g, " ")
+              .trim();
+
+            const href = anchor.href?.trim() ?? "";
+
+            return {
+              text,
+              href,
+            };
+          })
+          .filter((link) => link.href),
+      );
+
+      /**
+       * Hilangkan duplicate link.
+       *
+       * Beberapa website SPA bisa mempunyai link yang sama
+       * muncul berkali-kali di navbar/footer/button.
+       */
+      const uniqueLinks = Array.from(
+        new Map(
+          links.map((link) => [`${link.text}::${link.href}`, link]),
+        ).values(),
+      );
+
       const maxChars = 6000;
+
       let isTruncated = false;
 
       if (bodyText.length > maxChars) {
@@ -83,9 +138,14 @@ export const browsePageTool: Tool = {
       return JSON.stringify({
         url: targetUrl,
         title: title || "Tanpa Judul",
+
         contentLength: bodyText.length,
+
         isTruncated,
+
         content: bodyText || "(Halaman web tidak mengembalikan teks)",
+
+        links: uniqueLinks,
       });
     } catch (error: any) {
       console.error(

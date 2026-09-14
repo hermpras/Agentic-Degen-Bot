@@ -1,217 +1,57 @@
 import { AgentDatabase } from "../../database/agent-database.js";
-import {
-  TaskPlanner,
-  type TaskPlannerInput,
-} from "../../tasks/task-planner.js";
+import { ProjectTaskAnalyzer } from "../../projects/project-task-analyzer.js";
+import { BrowserExecutor } from "../../browser/browser-executor.js";
+import { LLMProvider } from "../../providers/llm.interface.js";
+import { TaskPlanner } from "../../tasks/task-planner.js";
 import type { Tool } from "../tool.interface.js";
-
-interface WorkflowRequirementInput {
-  type: string;
-  description: string;
-  targetUrl?: string;
-  producesOwnTweetUrl?: boolean;
-  requiresOwnTweetUrl?: boolean;
-  form?: {
-    formType: string;
-    targetUrl: string;
-    fields?: Array<{
-      type: string;
-      label?: string;
-      required?: boolean;
-    }>;
-    checkboxes?: Array<{
-      type: string;
-      label?: string;
-      required?: boolean;
-    }>;
-    submit?: {
-      selector?: string;
-      label?: string;
-      successSelector?: string;
-      successText?: string;
-    };
-  };
-}
 
 interface CreateProjectTaskPlanArgs {
   projectName: string;
   sourceUrl: string;
-  requirements: WorkflowRequirementInput[];
 }
 
-export function createProjectTaskPlanTool(database: AgentDatabase): Tool {
+export function createProjectTaskPlanTool(
+  database: AgentDatabase,
+  browser: BrowserExecutor,
+  llm: LLMProvider,
+): Tool {
   const planner = new TaskPlanner(database);
+
+  const analyzer = new ProjectTaskAnalyzer({
+    browser,
+    llm,
+  });
 
   return {
     name: "create_project_task_plan",
+
     description:
-      "Membuat task plan whitelist/project berdasarkan project yang sudah ada di database dan requirements yang diberikan. Tool ini HANYA membuat dan menyimpan plan, TIDAK mengeksekusi task. Plan yang dibuat memiliki planId yang nantinya digunakan untuk execution setelah approval.",
+      "Menganalisis halaman project secara langsung menggunakan ProjectTaskAnalyzer, " +
+      "mengambil grounded task evidence dari halaman yang diperiksa, " +
+      "menormalisasikannya menjadi atomic task secara deterministik, " +
+      "lalu membuat dan menyimpan task plan untuk ACTIVE accounts. " +
+      "Tool ini HANYA membuat dan menyimpan plan, TIDAK mengeksekusi task. " +
+      "Plan yang dibuat memiliki planId yang nantinya digunakan untuk execution setelah approval.",
+
     riskLevel: "SAFE",
 
     parameters: {
-      type: "object",
+      type: "object" as const,
+
       properties: {
         projectName: {
-          type: "string",
-          description: "Nama project yang sudah terdaftar di database.",
+          type: "string" as const,
+          description: "Nama project yang sedang dibuatkan task plan.",
         },
 
         sourceUrl: {
-          type: "string",
+          type: "string" as const,
           description:
-            "URL sumber project, website, announcement, Twitter/X, atau halaman requirements.",
-        },
-
-        requirements: {
-          type: "array",
-          description:
-            "Daftar requirements/task yang harus dilakukan untuk project.",
-
-          items: {
-            type: "object",
-
-            properties: {
-              type: {
-                type: "string",
-                description:
-                  "Jenis task, misalnya OPEN_PAGE, X_FOLLOW, X_LIKE, X_REPOST, X_COMMENT, X_REPLY, X_QUOTE, X_POST, FORM, FORM_TWITTER, FORM_WALLET, FORM_SUBMIT, WHITELIST, atau CUSTOM.",
-              },
-
-              description: {
-                type: "string",
-                description: "Deskripsi task yang harus dilakukan.",
-              },
-
-              targetUrl: {
-                type: "string",
-                description: "URL target task jika diperlukan.",
-              },
-
-              producesOwnTweetUrl: {
-                type: "boolean",
-                description:
-                  "Apakah task ini menghasilkan URL tweet milik account.",
-              },
-
-              requiresOwnTweetUrl: {
-                type: "boolean",
-                description:
-                  "Apakah task ini membutuhkan URL tweet milik account.",
-              },
-
-              form: {
-                type: "object",
-                description:
-                  "Konfigurasi form jika task membutuhkan pengisian form.",
-
-                properties: {
-                  formType: {
-                    type: "string",
-                    description: "Tipe form: WEBSITE atau GOOGLE_FORM.",
-                  },
-
-                  targetUrl: {
-                    type: "string",
-                    description: "URL form yang akan dibuka.",
-                  },
-
-                  fields: {
-                    type: "array",
-                    description: "Field form yang harus diisi.",
-
-                    items: {
-                      type: "object",
-
-                      properties: {
-                        type: {
-                          type: "string",
-                          description: "Tipe field.",
-                        },
-
-                        label: {
-                          type: "string",
-                          description: "Label field jika diketahui.",
-                        },
-
-                        required: {
-                          type: "boolean",
-                          description: "Apakah field wajib diisi.",
-                        },
-                      },
-
-                      required: ["type"],
-                    },
-                  },
-
-                  checkboxes: {
-                    type: "array",
-                    description: "Checkbox form yang harus dicentang.",
-
-                    items: {
-                      type: "object",
-
-                      properties: {
-                        type: {
-                          type: "string",
-                          description: "Tipe checkbox.",
-                        },
-
-                        label: {
-                          type: "string",
-                          description: "Label checkbox jika diketahui.",
-                        },
-
-                        required: {
-                          type: "boolean",
-                          description: "Apakah checkbox wajib dicentang.",
-                        },
-                      },
-
-                      required: ["type"],
-                    },
-                  },
-
-                  submit: {
-                    type: "object",
-                    description:
-                      "Konfigurasi submit dan verifikasi hasil form.",
-
-                    properties: {
-                      selector: {
-                        type: "string",
-                        description: "CSS selector tombol submit.",
-                      },
-
-                      label: {
-                        type: "string",
-                        description: "Label tombol submit.",
-                      },
-
-                      successSelector: {
-                        type: "string",
-                        description:
-                          "CSS selector yang harus muncul setelah submit berhasil.",
-                      },
-
-                      successText: {
-                        type: "string",
-                        description:
-                          "Teks yang harus muncul setelah submit berhasil.",
-                      },
-                    },
-                  },
-                },
-
-                required: ["formType", "targetUrl"],
-              },
-            },
-
-            required: ["type", "description"],
-          },
+            "URL halaman project, whitelist, quest, announcement, atau requirements yang harus dianalisis.",
         },
       },
 
-      required: ["projectName", "sourceUrl", "requirements"],
+      required: ["projectName", "sourceUrl"],
     },
 
     async execute(args: Record<string, any>): Promise<any> {
@@ -225,22 +65,51 @@ export function createProjectTaskPlanTool(database: AgentDatabase): Tool {
         throw new Error("sourceUrl wajib diisi.");
       }
 
-      if (
-        !Array.isArray(input.requirements) ||
-        input.requirements.length === 0
-      ) {
-        throw new Error(
-          "requirements wajib berupa array dan minimal memiliki satu requirement.",
-        );
+      const projectName = input.projectName.trim();
+      const sourceUrl = input.sourceUrl.trim();
+
+      if (!projectName) {
+        throw new Error("projectName tidak boleh kosong.");
       }
 
-      const plannerInput: TaskPlannerInput = {
-        projectName: input.projectName.trim(),
-        sourceUrl: input.sourceUrl.trim(),
-        requirements: input.requirements as any,
+      if (!sourceUrl) {
+        throw new Error("sourceUrl tidak boleh kosong.");
+      }
+
+      console.log(
+        `🔎 [create_project_task_plan] Menganalisis source URL: ${sourceUrl}`,
+      );
+
+      /*
+       * IMPORTANT:
+       *
+       * Jangan menerima evidence dari LLM utama.
+       *
+       * ProjectTaskAnalyzer adalah satu-satunya komponen yang:
+       *
+       * 1. membuka halaman project
+       * 2. membaca visible page content
+       * 3. membaca discovered links
+       * 4. meminta LLM analyzer menghasilkan TaskEvidence
+       * 5. menjalankan deterministic normalization
+       *
+       * Dengan demikian main Agent tidak bisa mengarang
+       * evidence lalu memasukkannya langsung ke planner.
+       */
+      const plannerInput = await analyzer.analyze(sourceUrl);
+
+      /*
+       * projectName dari analyzer/source dipakai sebagai source of truth
+       * untuk planner. Namun nama project dari tool tetap menjadi fallback
+       * karena user memberikan projectName secara eksplisit.
+       */
+      const normalizedPlannerInput = {
+        ...plannerInput,
+        projectName: plannerInput.projectName.trim() || projectName,
+        sourceUrl,
       };
 
-      const plan = planner.createPlan(plannerInput);
+      const plan = planner.createPlan(normalizedPlannerInput);
 
       const planId = database.saveTaskPlan({
         projectName: plan.projectName,
@@ -257,12 +126,20 @@ export function createProjectTaskPlanTool(database: AgentDatabase): Tool {
       return {
         success: true,
         executionStarted: false,
+
         planId,
+
         status: "PLANNED",
-        message: `Task plan #${planId} berhasil dibuat dan disimpan. Belum ada task yang dieksekusi. Gunakan planId ${planId} untuk execution setelah approval.`,
+
+        message:
+          `Task plan #${planId} berhasil dibuat dan disimpan. ` +
+          `Task dibuat berdasarkan halaman project yang dianalisis oleh ProjectTaskAnalyzer. ` +
+          `Belum ada task yang dieksekusi. ` +
+          `Gunakan planId ${planId} untuk execution setelah approval.`,
 
         projectName: plan.projectName,
         sourceUrl: plan.sourceUrl,
+
         accountCount: plan.accountCount,
         taskCount: plan.taskCount,
 
