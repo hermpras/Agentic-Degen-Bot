@@ -16,7 +16,6 @@ export function createProjectTaskPlanTool(
   llm: LLMProvider,
 ): Tool {
   const planner = new TaskPlanner(database);
-
   const analyzer = new ProjectTaskAnalyzer({
     browser,
     llm,
@@ -26,54 +25,52 @@ export function createProjectTaskPlanTool(
     name: "create_project_task_plan",
 
     description:
-      "Menganalisis halaman project secara langsung menggunakan ProjectTaskAnalyzer, " +
-      "mengambil grounded task evidence dari halaman yang diperiksa, " +
-      "menormalisasikannya menjadi atomic task secara deterministik, " +
-      "lalu membuat dan menyimpan task plan untuk ACTIVE accounts. " +
-      "Tool ini HANYA membuat dan menyimpan plan, TIDAK mengeksekusi task. " +
-      "Plan yang dibuat memiliki planId yang nantinya digunakan untuk execution setelah approval.",
+      "Menganalisis source URL project secara langsung menggunakan browser, " +
+      "menemukan requirement task yang benar-benar terlihat di halaman, " +
+      "menormalisasikannya secara deterministic, membuat task plan untuk " +
+      "semua ACTIVE accounts, dan menyimpan plan ke database. " +
+      "Tool ini hanya membuat plan dan tidak mengeksekusi task.",
 
     riskLevel: "SAFE",
 
     parameters: {
-      type: "object" as const,
-
+      type: "object",
       properties: {
         projectName: {
-          type: "string" as const,
-          description: "Nama project yang sedang dibuatkan task plan.",
+          type: "string",
+          description: "Nama project.",
         },
-
         sourceUrl: {
-          type: "string" as const,
+          type: "string",
           description:
-            "URL halaman project, whitelist, quest, announcement, atau requirements yang harus dianalisis.",
+            "URL halaman project yang menjadi sumber requirement task.",
         },
       },
-
       required: ["projectName", "sourceUrl"],
     },
 
-    async execute(args: Record<string, any>): Promise<any> {
-      const input = args as CreateProjectTaskPlanArgs;
+    async execute(args: unknown): Promise<string> {
+      const input = args as Partial<CreateProjectTaskPlanArgs>;
 
-      if (!input.projectName || typeof input.projectName !== "string") {
+      const projectName =
+        typeof input.projectName === "string" ? input.projectName.trim() : "";
+
+      const sourceUrl =
+        typeof input.sourceUrl === "string" ? input.sourceUrl.trim() : "";
+
+      if (!projectName) {
         throw new Error("projectName wajib diisi.");
       }
 
-      if (!input.sourceUrl || typeof input.sourceUrl !== "string") {
+      if (!sourceUrl) {
         throw new Error("sourceUrl wajib diisi.");
       }
 
-      const projectName = input.projectName.trim();
-      const sourceUrl = input.sourceUrl.trim();
-
-      if (!projectName) {
-        throw new Error("projectName tidak boleh kosong.");
-      }
-
-      if (!sourceUrl) {
-        throw new Error("sourceUrl tidak boleh kosong.");
+      if (
+        !sourceUrl.startsWith("http://") &&
+        !sourceUrl.startsWith("https://")
+      ) {
+        throw new Error(`Source URL tidak didukung: ${sourceUrl}`);
       }
 
       console.log(
@@ -81,36 +78,62 @@ export function createProjectTaskPlanTool(
       );
 
       /*
-       * IMPORTANT:
+       * Browser lifecycle dibuat lazy/idempotent.
        *
-       * Jangan menerima evidence dari LLM utama.
+       * BrowserExecutor.start() aman dipanggil berkali-kali:
+       * - kalau browser belum hidup -> browser dijalankan
+       * - kalau browser sudah hidup -> langsung return
        *
-       * ProjectTaskAnalyzer adalah satu-satunya komponen yang:
+       * Dengan begitu tool tidak bergantung sepenuhnya pada lifecycle
+       * BrowserExecutor di agent-profiles.ts.
+       */
+      await browser.start();
+
+      console.log(
+        "🌐 [create_project_task_plan] Browser siap, menjalankan ProjectTaskAnalyzer...",
+      );
+
+      /*
+       * Analyzer membaca halaman project secara langsung.
        *
-       * 1. membuka halaman project
-       * 2. membaca visible page content
-       * 3. membaca discovered links
-       * 4. meminta LLM analyzer menghasilkan TaskEvidence
-       * 5. menjalankan deterministic normalization
+       * Analyzer bertanggung jawab untuk:
+       * 1. membuka source URL
+       * 2. membaca page text + links
+       * 3. meminta LLM membuat grounded TaskEvidence
+       * 4. melakukan deterministic normalization
        *
-       * Dengan demikian main Agent tidak bisa mengarang
-       * evidence lalu memasukkannya langsung ke planner.
+       * Main Agent tidak mengirim evidence manual.
        */
       const plannerInput = await analyzer.analyze(sourceUrl);
 
       /*
-       * projectName dari analyzer/source dipakai sebagai source of truth
-       * untuk planner. Namun nama project dari tool tetap menjadi fallback
-       * karena user memberikan projectName secara eksplisit.
+       * Project name dari analyzer boleh dipakai jika valid.
+       * Namun fallback ke projectName yang diberikan tool tetap tersedia.
        */
       const normalizedPlannerInput = {
         ...plannerInput,
-        projectName: plannerInput.projectName.trim() || projectName,
+        projectName:
+          typeof plannerInput.projectName === "string" &&
+          plannerInput.projectName.trim()
+            ? plannerInput.projectName.trim()
+            : projectName,
         sourceUrl,
       };
 
+      console.log(
+        `🧠 [create_project_task_plan] Requirement ditemukan: ${normalizedPlannerInput.requirements.length}`,
+      );
+
+      /*
+       * TaskPlanner membuat task deterministic berdasarkan:
+       * - requirement hasil analyzer
+       * - ACTIVE accounts dari database
+       */
       const plan = planner.createPlan(normalizedPlannerInput);
 
+      /*
+       * Simpan plan ke database.
+       */
       const planId = database.saveTaskPlan({
         projectName: plan.projectName,
         sourceUrl: plan.sourceUrl,
@@ -120,40 +143,24 @@ export function createProjectTaskPlanTool(
       });
 
       console.log(
-        `📋 [create_project_task_plan] Plan #${planId} disimpan untuk project "${plan.projectName}".`,
+        `📋 [create_project_task_plan] Plan #${planId} tersimpan: ` +
+          `${plan.accountCount} accounts, ${plan.taskCount} tasks.`,
       );
 
-      return {
-        success: true,
-        executionStarted: false,
-
-        planId,
-
-        status: "PLANNED",
-
-        message:
-          `Task plan #${planId} berhasil dibuat dan disimpan. ` +
-          `Task dibuat berdasarkan halaman project yang dianalisis oleh ProjectTaskAnalyzer. ` +
-          `Belum ada task yang dieksekusi. ` +
-          `Gunakan planId ${planId} untuk execution setelah approval.`,
-
-        projectName: plan.projectName,
-        sourceUrl: plan.sourceUrl,
-
-        accountCount: plan.accountCount,
-        taskCount: plan.taskCount,
-
-        tasks: plan.tasks.map((task) => ({
-          planTaskId: task.planTaskId,
-          taskType: task.taskType,
-          projectName: task.projectName,
-          accountName: task.accountName,
-          description: task.description,
-          targetUrl: task.targetUrl,
-          dependsOn: task.dependsOn,
-          hasForm: Boolean(task.form),
-        })),
-      };
+      return JSON.stringify(
+        {
+          success: true,
+          message: "Task plan berhasil dibuat dan disimpan.",
+          planId,
+          projectName: plan.projectName,
+          sourceUrl: plan.sourceUrl,
+          accountCount: plan.accountCount,
+          taskCount: plan.taskCount,
+          tasks: plan.tasks,
+        },
+        null,
+        2,
+      );
     },
   };
 }
