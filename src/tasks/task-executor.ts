@@ -116,6 +116,7 @@ export class TaskExecutor {
 
     try {
       databaseTaskId = this.createDatabaseTask(task);
+
       this.taskManager.markTaskInProgress(databaseTaskId);
 
       const actionResult = await this.executeTaskAction(task, databaseTaskId);
@@ -239,18 +240,21 @@ export class TaskExecutor {
    *
    * Tidak melakukan login username/password.
    *
-   * Mode browser ditentukan oleh:
-   * X_CONNECT_CDP_URL
-   * X_CDP_URL
-   * X_STORAGE_STATE_PATH
+   * Mode browser:
+   * - X_CONNECT_CDP_URL
+   * - X_CDP_URL
+   * - X_STORAGE_STATE_PATH
    *
    * Untuk CDP:
    * X_CONNECT_CDP_URL=http://127.0.0.1:9222
    *
    * Browser harus sudah memiliki session X yang login.
    *
-   * Setelah OAuth dimulai, executor akan melakukan polling terhadap
-   * halaman aktif untuk mendeteksi redirect kembali ke project.
+   * Setelah OAuth dimulai, executor melakukan polling
+   * terhadap seluruh halaman aktif sampai:
+   * - callback project terdeteksi,
+   * - kembali ke origin project,
+   * - atau timeout.
    */
   private async executeXConnect(
     task: PlannedTask,
@@ -324,19 +328,19 @@ export class TaskExecutor {
       const bodyTextBefore = (result.text ?? "").replace(/\s+/g, " ").trim();
 
       const hasConnectInstruction =
-        /sign\s*in\s*with\s*x|connect\s+with\s*x|continue\s+with\s*x|login\s+with\s*x|log\s*in\s+with\s*x/i.test(
+        /sign\s*in\s*with\s*x|connect\s+with\s*x|continue\s+with\s*x|login\s+with\s*x|log\s*in\s*with\s*x/i.test(
           bodyTextBefore,
         );
 
       const connectButton = page
         .getByRole("button", {
-          name: /sign\s*in\s*with\s*x|connect\s+with\s*x|continue\s+with\s*x|login\s+with\s*x|log\s*in\s+with\s*x/i,
+          name: /sign\s*in\s*with\s*x|connect\s+with\s*x|continue\s+with\s*x|login\s+with\s*x|log\s*in\s*with\s*x/i,
         })
         .first();
 
       const connectLink = page
         .getByRole("link", {
-          name: /sign\s*in\s*with\s*x|connect\s+with\s*x|continue\s+with\s*x|login\s+with\s*x|log\s*in\s+with\s*x/i,
+          name: /sign\s*in\s*with\s*x|connect\s+with\s*x|continue\s+with\s*x|login\s+with\s*x|log\s*in\s*with\s*x/i,
         })
         .first();
 
@@ -362,6 +366,37 @@ export class TaskExecutor {
         clicked = true;
       }
 
+      /**
+       * IMPORTANT:
+       *
+       * browser.open() dapat langsung mengikuti redirect:
+       *
+       * /auth/x/start
+       *        ↓
+       * x.com/i/oauth2/authorize
+       *
+       * Dalam kondisi tersebut tidak ada tombol Connect
+       * yang perlu diklik lagi.
+       *
+       * Jadi OAuth URL X harus dianggap sebagai OAuth yang
+       * sudah dimulai dan executor wajib masuk polling.
+       */
+      const isXOAuthUrl =
+        /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/i\/oauth2\/authorize/i.test(
+          initialUrl,
+        ) || /\/oauth2\/authorize(?:[/?#]|$)/i.test(initialUrl);
+
+      if (isXOAuthUrl) {
+        console.log(
+          `🔐 [TaskExecutor] X_CONNECT OAuth authorization page terdeteksi langsung.`,
+        );
+        console.log(
+          `⏳ [TaskExecutor] X_CONNECT menunggu authorization manual dan callback project.`,
+        );
+
+        clicked = true;
+      }
+
       if (!clicked && !hasConnectInstruction) {
         const currentUrl = await browser.getCurrentUrl();
 
@@ -373,7 +408,7 @@ export class TaskExecutor {
             targetUrl: task.targetUrl,
             currentUrl,
             message:
-              "Halaman tidak menampilkan tombol/link Connect with X dan tidak berada pada OAuth start endpoint.",
+              "Halaman tidak menampilkan tombol/link Connect with X, tidak berada pada OAuth start endpoint, dan bukan halaman OAuth authorization X.",
           },
           null,
           2,
@@ -387,17 +422,6 @@ export class TaskExecutor {
         };
       }
 
-      /**
-       * OAuth flow dapat:
-       *
-       * 1. tetap pada tab yang sama,
-       * 2. membuka popup/tab baru,
-       * 3. redirect ke X,
-       * 4. redirect kembali ke callback project.
-       *
-       * Kita polling beberapa detik supaya user punya waktu
-       * menyelesaikan authorization secara manual.
-       */
       const pollIntervalMs = 1000;
       const maxWaitMs = 30000;
       const startedWaitingAt = Date.now();
@@ -412,182 +436,200 @@ export class TaskExecutor {
         const pages = browser.getOpenPages();
 
         /**
-         * Jika OAuth membuka popup/tab baru, gunakan page terakhir.
+         * Periksa semua page, bukan hanya page terakhir.
+         *
+         * OAuth bisa saja membuka popup/tab baru.
          */
-        if (pages.length > 0) {
-          const candidatePage = pages[pages.length - 1];
+        const candidatePages = pages.length > 0 ? pages : [page];
 
-          if (candidatePage !== page) {
-            console.log(
-              `🪟 [TaskExecutor] X_CONNECT menemukan browser page tambahan.`,
+        for (const candidatePage of candidatePages) {
+          try {
+            const candidateUrl = candidatePage.url();
+
+            /**
+             * Callback URL adalah completion signal
+             * paling kuat.
+             */
+            const isProjectCallback = /\/auth\/x\/callback(?:[/?#]|$)/i.test(
+              candidateUrl,
             );
 
-            page = candidatePage;
-            browser.usePage(candidatePage);
+            if (isProjectCallback) {
+              page = candidatePage;
+              browser.usePage(candidatePage);
+
+              const title = await page.title().catch(() => "");
+
+              const bodyText = (
+                await page
+                  .locator("body")
+                  .innerText()
+                  .catch(() => "")
+              )
+                .replace(/\s+/g, " ")
+                .trim();
+
+              const output = JSON.stringify(
+                {
+                  action: "X_CONNECT",
+                  status: "CONNECTED",
+                  accountName: task.accountName,
+                  targetUrl: task.targetUrl,
+                  callbackUrl: candidateUrl,
+                  title,
+                  message:
+                    "OAuth Connect with X berhasil kembali ke callback project.",
+                  callbackDetected: true,
+                  callbackBodyPreview: bodyText.slice(0, 1000),
+                },
+                null,
+                2,
+              );
+
+              this.taskManager.saveTaskProof(databaseTaskId, output);
+
+              console.log(
+                `✅ [TaskExecutor] X_CONNECT OAuth callback terdeteksi.`,
+              );
+
+              console.log(`🔗 [TaskExecutor] Callback URL: ${candidateUrl}`);
+
+              return {
+                output,
+                status: "DONE",
+              };
+            }
+
+            /**
+             * Fallback:
+             *
+             * Jika OAuth selesai dan project langsung redirect
+             * ke root/halaman project tanpa mempertahankan
+             * /auth/x/callback di URL.
+             */
+            let targetOrigin: string | null = null;
+            let currentOrigin: string | null = null;
+
+            try {
+              targetOrigin = new URL(task.targetUrl).origin;
+
+              currentOrigin = new URL(candidateUrl).origin;
+            } catch {
+              // Ignore malformed URL.
+            }
+
+            const returnedToProject =
+              targetOrigin !== null &&
+              currentOrigin !== null &&
+              currentOrigin === targetOrigin &&
+              !/\/auth\/x\/start/i.test(candidateUrl);
+
+            if (returnedToProject) {
+              /**
+               * Jangan menganggap URL project langsung sebagai
+               * success jika kita bahkan belum masuk OAuth.
+               *
+               * Di sini success hanya dianggap valid apabila
+               * sebelumnya OAuth memang sudah dimulai.
+               */
+              if (clicked || isXOAuthUrl) {
+                page = candidatePage;
+                browser.usePage(candidatePage);
+
+                const title = await page.title().catch(() => "");
+
+                const bodyText = (
+                  await page
+                    .locator("body")
+                    .innerText()
+                    .catch(() => "")
+                )
+                  .replace(/\s+/g, " ")
+                  .trim();
+
+                const output = JSON.stringify(
+                  {
+                    action: "X_CONNECT",
+                    status: "CONNECTED",
+                    accountName: task.accountName,
+                    targetUrl: task.targetUrl,
+                    currentUrl: candidateUrl,
+                    title,
+                    message:
+                      "OAuth Connect with X telah kembali ke domain project setelah authorization.",
+                    callbackDetected: false,
+                    projectOriginDetected: true,
+                    bodyPreview: bodyText.slice(0, 1000),
+                  },
+                  null,
+                  2,
+                );
+
+                this.taskManager.saveTaskProof(databaseTaskId, output);
+
+                console.log(
+                  `✅ [TaskExecutor] X_CONNECT kembali ke domain project.`,
+                );
+
+                console.log(`🔗 [TaskExecutor] Project URL: ${candidateUrl}`);
+
+                return {
+                  output,
+                  status: "DONE",
+                };
+              }
+            }
+
+            /**
+             * Log perubahan URL dari page mana pun.
+             */
+            if (candidateUrl !== lastUrl) {
+              console.log(
+                `🔗 [TaskExecutor] X_CONNECT URL berubah: ${candidateUrl}`,
+              );
+
+              lastUrl = candidateUrl;
+            }
+
+            const isXDomain =
+              /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)(?:\/|$)/i.test(
+                candidateUrl,
+              );
+
+            if (isXDomain) {
+              console.log(
+                `🔐 [TaskExecutor] X_CONNECT masih berada di X. Menunggu authorization...`,
+              );
+            }
+          } catch (error) {
+            console.warn(
+              `⚠️ [TaskExecutor] Gagal membaca browser page saat polling: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
           }
         }
 
-        const activePage = browser.getActivePage();
-
-        await activePage
-          .waitForLoadState("domcontentloaded")
-          .catch(() => undefined);
-
-        const currentUrl = await browser.getCurrentUrl();
-
-        if (currentUrl !== lastUrl) {
-          console.log(`🔗 [TaskExecutor] X_CONNECT URL berubah: ${currentUrl}`);
-
-          lastUrl = currentUrl;
-        }
-
         /**
-         * Completion signal utama:
-         *
-         * https://whitelist.consensus.games/auth/x/callback
-         *
-         * Kita tidak menganggap sekadar berada di x.com
-         * sebagai sukses.
+         * Pastikan active page tetap hidup dan menunggu
+         * sedikit sebelum polling berikutnya.
          */
-        const isProjectCallback = /\/auth\/x\/callback(?:[/?#]|$)/i.test(
-          currentUrl,
-        );
-
-        if (isProjectCallback) {
-          const title = await activePage.title().catch(() => "");
-
-          const bodyText = (
-            await activePage
-              .locator("body")
-              .innerText()
-              .catch(() => "")
-          )
-            .replace(/\s+/g, " ")
-            .trim();
-
-          const output = JSON.stringify(
-            {
-              action: "X_CONNECT",
-              status: "CONNECTED",
-              accountName: task.accountName,
-              targetUrl: task.targetUrl,
-              callbackUrl: currentUrl,
-              title,
-              message:
-                "OAuth Connect with X berhasil kembali ke callback project.",
-              callbackDetected: true,
-              callbackBodyPreview: bodyText.slice(0, 1000),
-            },
-            null,
-            2,
-          );
-
-          this.taskManager.saveTaskProof(databaseTaskId, output);
-
-          console.log(`✅ [TaskExecutor] X_CONNECT OAuth callback terdeteksi.`);
-          console.log(`🔗 [TaskExecutor] Callback URL: ${currentUrl}`);
-
-          return {
-            output,
-            status: "DONE",
-          };
-        }
-
-        /**
-         * Fallback:
-         *
-         * Jika callback melakukan redirect cepat ke halaman
-         * project lain setelah callback diproses, kita tetap
-         * bisa mengenali bahwa browser sudah kembali ke
-         * origin project.
-         */
-        let targetOrigin: string | null = null;
-        let currentOrigin: string | null = null;
-
         try {
-          targetOrigin = new URL(task.targetUrl).origin;
-          currentOrigin = new URL(currentUrl).origin;
+          page = browser.getActivePage();
+          browser.usePage(page);
+
+          await page
+            .waitForLoadState("domcontentloaded")
+            .catch(() => undefined);
+
+          await page.waitForTimeout(pollIntervalMs);
         } catch {
-          // Ignore malformed URL here; final state tetap IN_PROGRESS.
+          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
         }
-
-        const returnedToProject =
-          targetOrigin !== null &&
-          currentOrigin !== null &&
-          currentOrigin === targetOrigin &&
-          !/\/auth\/x\/start/i.test(currentUrl);
-
-        if (returnedToProject) {
-          const title = await activePage.title().catch(() => "");
-
-          const bodyText = (
-            await activePage
-              .locator("body")
-              .innerText()
-              .catch(() => "")
-          )
-            .replace(/\s+/g, " ")
-            .trim();
-
-          const output = JSON.stringify(
-            {
-              action: "X_CONNECT",
-              status: "CONNECTED",
-              accountName: task.accountName,
-              targetUrl: task.targetUrl,
-              currentUrl,
-              title,
-              message:
-                "OAuth Connect with X telah kembali ke domain project setelah authorization.",
-              callbackDetected: false,
-              projectOriginDetected: true,
-              bodyPreview: bodyText.slice(0, 1000),
-            },
-            null,
-            2,
-          );
-
-          this.taskManager.saveTaskProof(databaseTaskId, output);
-
-          console.log(`✅ [TaskExecutor] X_CONNECT kembali ke domain project.`);
-
-          return {
-            output,
-            status: "DONE",
-          };
-        }
-
-        /**
-         * Jangan menganggap halaman X sebagai sukses.
-         *
-         * User tetap boleh melakukan login/authorization
-         * manual pada browser.
-         */
-        const isXDomain =
-          /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)(?:\/|$)/i.test(
-            currentUrl,
-          );
-
-        if (isXDomain) {
-          console.log(
-            `🔐 [TaskExecutor] X_CONNECT masih berada di X. Menunggu authorization...`,
-          );
-        }
-
-        /**
-         * Jangan terlalu agresif melakukan DOM inspection
-         * setiap polling. Kita hanya delay lalu cek lagi.
-         */
-        await activePage.waitForTimeout(pollIntervalMs);
       }
 
-      /**
-       * Timeout:
-       *
-       * Executor tidak mengklaim gagal karena user mungkin
-       * masih melihat OAuth page / belum menekan authorize.
-       */
       const activePage = browser.getActivePage();
+
       const currentUrl = await browser.getCurrentUrl();
 
       const title = await activePage.title().catch(() => "");
@@ -621,9 +663,8 @@ export class TaskExecutor {
       /**
        * Jangan close browser CDP external milik user.
        *
-       * BrowserExecutor.close() akan menutup context CDP,
-       * sehingga untuk X session external kita sengaja
-       * tidak menutup browser.
+       * BrowserExecutor.close() dapat menutup context CDP,
+       * sehingga external X browser sengaja tidak ditutup.
        */
       if (cdpUrl) {
         console.log(
@@ -1042,7 +1083,7 @@ export class TaskExecutor {
 
     const llm = new GeminiProvider(
       apiKey,
-      process.env.GEMINI_MODEL || "gemini-3.5-flash",
+      process.env.GEMINI_MODEL ?? "gemini-3.5-flash",
     );
 
     const browser = new BrowserExecutor({
