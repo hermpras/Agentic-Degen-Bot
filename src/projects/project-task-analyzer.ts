@@ -9,7 +9,9 @@ export interface ProjectTaskAnalyzerOptions {
 
 interface TaskEvidence {
   kind: "ACTION" | "FORM" | "CONTEXT";
+
   description: string;
+
   sourceQuote: string;
 
   actionType?: string;
@@ -25,12 +27,14 @@ interface TaskEvidence {
     | "UNKNOWN";
 
   producesOwnTweetUrl?: boolean;
+
   requiresOwnTweetUrl?: boolean;
 
   walletInteraction?: "NONE" | "CONNECT" | "SIGN" | "APPROVE" | "UNKNOWN";
 
   form?: {
     formType?: "WEBSITE" | "GOOGLE_FORM";
+
     targetUrl?: string;
 
     fields?: Array<{
@@ -146,7 +150,6 @@ export class ProjectTaskAnalyzer {
 
     const result = await this.options.llm.generate({
       systemInstruction: this.buildSystemInstruction(),
-
       messages: [
         {
           role: "user",
@@ -157,13 +160,47 @@ export class ProjectTaskAnalyzer {
           ),
         },
       ],
-
       tools: [this.createAnalyzeTool()],
     });
 
     const args = this.extractToolArguments(result);
 
-    return this.validateAndNormalizeResult(args, parsedUrl.toString());
+    /*
+     * LLM evidence tetap menjadi sumber utama interpretasi.
+     *
+     * Tetapi action X yang benar-benar terlihat di halaman juga kita
+     * ekstrak secara deterministic dari page text + discovered links.
+     *
+     * Tujuannya supaya satu missed action dari LLM tidak membuat
+     * requirement hilang seluruhnya.
+     */
+    const deterministicEvidence = this.extractDeterministicXEvidence(
+      page.text,
+      page.links,
+    );
+
+    if (deterministicEvidence.length > 0) {
+      console.log(
+        `🧭 [ProjectTaskAnalyzer] Deterministic X evidence ditemukan: ${deterministicEvidence.length}`,
+      );
+
+      for (const evidence of deterministicEvidence) {
+        console.log(`   • ${evidence.actionType}: ${evidence.description}`);
+      }
+    }
+
+    const mergedEvidence = this.mergeEvidence(
+      args.evidence,
+      deterministicEvidence,
+    );
+
+    return this.validateAndNormalizeResult(
+      {
+        ...args,
+        evidence: mergedEvidence,
+      },
+      parsedUrl.toString(),
+    );
   }
 
   private buildPageContext(
@@ -197,7 +234,6 @@ export class ProjectTaskAnalyzer {
         text: String(link.text ?? "")
           .replace(/\s+/g, " ")
           .trim(),
-
         href: String(link.href ?? "").trim(),
       }))
       .filter((link) => link.href);
@@ -214,7 +250,6 @@ export class ProjectTaskAnalyzer {
 
     const linkLines = linksForContext.map((link, index) => {
       const label = link.text || "(no visible link text)";
-
       return `${index + 1}. [${label}] ${link.href}`;
     });
 
@@ -629,15 +664,11 @@ Return only evidence supported by the inspected page.
   private createAnalyzeTool() {
     return {
       name: "create_project_task_evidence",
-
       description:
         "Create grounded intermediate task evidence from the inspected project page.",
-
       riskLevel: "SAFE" as const,
-
       parameters: {
         type: "object" as const,
-
         properties: {
           projectName: {
             type: "string" as const,
@@ -651,7 +682,6 @@ Return only evidence supported by the inspected page.
 
           evidence: {
             type: "array" as const,
-
             description:
               "Intermediate evidence describing actionable requirements and relevant context.",
 
@@ -850,7 +880,7 @@ Return only evidence supported by the inspected page.
     return toolCall.args as AnalyzeProjectArgs;
   }
 
-  /*
+  /**
    * Public static entry point.
    *
    * Dipakai oleh create-project-task-plan.tool.ts
@@ -881,7 +911,7 @@ Return only evidence supported by the inspected page.
 
     const requirements: TaskRequirement[] = [];
 
-    /*
+    /**
      * Kita pakai helper instance-less.
      *
      * Semua method normalisasi di bawah ini
@@ -968,6 +998,509 @@ Return only evidence supported by the inspected page.
     });
   }
 
+  /**
+   * Extract X actions deterministically dari halaman yang benar-benar
+   * sudah dibaca browser.
+   *
+   * Prinsip:
+   * - hanya mencari action verb yang nyata di page text
+   * - hanya menggunakan URL X yang benar-benar ditemukan
+   * - tidak membuat tweet/status ID
+   * - tidak menganggap setiap mention "X/Twitter" sebagai task
+   */
+  private extractDeterministicXEvidence(
+    text: string,
+    links: Array<{
+      text: string;
+      href: string;
+    }>,
+  ): TaskEvidence[] {
+    const normalizedText = text
+      .replace(/\r\n/g, "\n")
+      .replace(/[ \t]+/g, " ")
+      .trim();
+
+    if (!normalizedText) {
+      return [];
+    }
+
+    const normalizedLinks = links
+      .map((link) => ({
+        text: String(link.text ?? "")
+          .replace(/\s+/g, " ")
+          .trim(),
+
+        href: String(link.href ?? "").trim(),
+      }))
+      .filter((link) => link.href);
+
+    const xProfileUrls = normalizedLinks
+      .map((link) => link.href)
+      .filter((href) => this.isValidXProfileHref(href));
+
+    const xStatusUrls = normalizedLinks
+      .map((link) => link.href)
+      .filter((href) => this.isValidXStatusHref(href));
+
+    const xIntentUrls = normalizedLinks
+      .map((link) => link.href)
+      .filter((href) => this.isValidXIntentHref(href));
+
+    const targetStatusUrl = xStatusUrls.length > 0 ? xStatusUrls[0] : null;
+
+    const targetProfileUrl = xProfileUrls.length > 0 ? xProfileUrls[0] : null;
+
+    const evidence: TaskEvidence[] = [];
+
+    /*
+     * Pecah page text menjadi unit yang lebih kecil.
+     *
+     * Ini penting supaya kata "like" yang muncul jauh di bagian
+     * background project tidak otomatis dianggap task.
+     */
+    const textUnits = normalizedText
+      .split(/\n+|(?<=[.!?])\s+/)
+      .map((unit) => unit.trim())
+      .filter(Boolean);
+
+    const actionDetectors: Array<{
+      type:
+        | "X_FOLLOW"
+        | "X_LIKE"
+        | "X_REPOST"
+        | "X_COMMENT"
+        | "X_REPLY"
+        | "X_QUOTE";
+
+      regex: RegExp;
+
+      labels: string[];
+    }> = [
+      {
+        type: "X_FOLLOW",
+        regex:
+          /\b(?:follow|follow\s+us|follow\s+our|follow\s+on\s+x|follow\s+on\s+twitter)\b/i,
+        labels: ["follow"],
+      },
+
+      {
+        type: "X_LIKE",
+        regex: /\b(?:like|like\s+this|like\s+the|like\s+our)\b/i,
+        labels: ["like"],
+      },
+
+      {
+        type: "X_REPOST",
+        regex: /\b(?:repost|retweet|retweeting|rt)\b/i,
+        labels: ["repost", "retweet", "rt"],
+      },
+
+      {
+        type: "X_COMMENT",
+        regex:
+          /\b(?:comment|comment\s+on|leave\s+a\s+comment|drop\s+a\s+comment)\b/i,
+        labels: ["comment"],
+      },
+
+      {
+        type: "X_REPLY",
+        regex: /\b(?:reply|reply\s+to|replying)\b/i,
+        labels: ["reply"],
+      },
+
+      {
+        type: "X_QUOTE",
+        regex: /\b(?:quote|quote\s+tweet|quote\s+this|quote\s+the)\b/i,
+        labels: ["quote"],
+      },
+    ];
+
+    for (const unit of textUnits) {
+      const hasXContext =
+        /\b(?:x\.com|twitter\.com|twitter|tweet|tweeting|post|pinned post|pinned tweet|social)\b/i.test(
+          unit,
+        );
+
+      if (!hasXContext) {
+        continue;
+      }
+
+      for (const detector of actionDetectors) {
+        if (!detector.regex.test(unit)) {
+          continue;
+        }
+
+        const targetUrl =
+          detector.type === "X_FOLLOW"
+            ? targetProfileUrl
+            : (targetStatusUrl ??
+              this.findMatchingIntentUrl(detector.type, xIntentUrls));
+
+        evidence.push({
+          kind: "ACTION",
+          description: this.buildDeterministicActionDescription(
+            detector.type,
+            unit,
+          ),
+          sourceQuote: unit,
+          actionType: detector.type,
+          targetUrl,
+          targetKind: targetUrl ? this.detectXTargetKind(targetUrl) : "UNKNOWN",
+          producesOwnTweetUrl: false,
+          requiresOwnTweetUrl: false,
+          walletInteraction: "NONE",
+        });
+      }
+    }
+
+    /*
+     * Ada halaman yang menampilkan action sebagai link text,
+     * sementara kalimat instruksi tidak menyebut "X/Twitter".
+     *
+     * Contoh:
+     *   [Like] https://x.com/intent/like?tweet_id=...
+     *
+     * Link intent seperti ini adalah bukti langsung yang jauh lebih
+     * kuat daripada sekadar kata "like" di halaman.
+     */
+    for (const link of normalizedLinks) {
+      const intentType = this.detectXIntentAction(link.href);
+
+      if (!intentType) {
+        continue;
+      }
+
+      const visibleLabel = link.text || intentType;
+
+      evidence.push({
+        kind: "ACTION",
+        description: `${this.humanizeXActionType(
+          intentType,
+        )} menggunakan link X yang ditemukan di halaman.`,
+        sourceQuote: visibleLabel,
+        actionType: intentType,
+        targetUrl: link.href,
+        targetKind: "X_INTENT",
+        producesOwnTweetUrl: false,
+        requiresOwnTweetUrl: false,
+        walletInteraction: "NONE",
+      });
+    }
+
+    /*
+     * Dedupe berdasarkan action + target + sourceQuote.
+     */
+    const unique = new Map<string, TaskEvidence>();
+
+    for (const item of evidence) {
+      const key = [
+        item.actionType ?? "",
+        item.targetUrl ?? "",
+        item.sourceQuote.toLowerCase(),
+      ].join("|");
+
+      if (!unique.has(key)) {
+        unique.set(key, item);
+      }
+    }
+
+    /*
+     * Jangan hasilkan duplicate action yang sama hanya karena satu
+     * halaman memiliki beberapa kalimat yang semuanya mengandung
+     * kata "like".
+     *
+     * Jika sudah ada evidence dengan target status yang sama,
+     * prioritaskan evidence tersebut.
+     */
+    const dedupedByActionAndTarget = new Map<string, TaskEvidence>();
+
+    for (const item of unique.values()) {
+      const key = `${item.actionType}|${item.targetUrl ?? ""}`;
+
+      const existing = dedupedByActionAndTarget.get(key);
+
+      if (!existing) {
+        dedupedByActionAndTarget.set(key, item);
+        continue;
+      }
+
+      const existingHasStatus = existing.targetKind === "X_STATUS";
+
+      const currentHasStatus = item.targetKind === "X_STATUS";
+
+      if (!existingHasStatus && currentHasStatus) {
+        dedupedByActionAndTarget.set(key, item);
+      }
+    }
+
+    return Array.from(dedupedByActionAndTarget.values());
+  }
+
+  private mergeEvidence(
+    llmEvidence: TaskEvidence[],
+    deterministicEvidence: TaskEvidence[],
+  ): TaskEvidence[] {
+    const merged: TaskEvidence[] = [];
+
+    for (const evidence of llmEvidence ?? []) {
+      if (!evidence || typeof evidence !== "object") {
+        continue;
+      }
+
+      merged.push(evidence);
+    }
+
+    for (const evidence of deterministicEvidence) {
+      const isDuplicate = merged.some((existing) => {
+        const existingType = String(existing.actionType ?? "")
+          .trim()
+          .toUpperCase();
+
+        const currentType = String(evidence.actionType ?? "")
+          .trim()
+          .toUpperCase();
+
+        if (
+          existing.kind === "ACTION" &&
+          evidence.kind === "ACTION" &&
+          existingType &&
+          currentType &&
+          existingType === currentType
+        ) {
+          const existingTarget = String(existing.targetUrl ?? "").trim();
+
+          const currentTarget = String(evidence.targetUrl ?? "").trim();
+
+          /*
+           * Kalau keduanya menunjuk target yang sama,
+           * anggap duplicate.
+           */
+          if (
+            existingTarget &&
+            currentTarget &&
+            existingTarget === currentTarget
+          ) {
+            return true;
+          }
+
+          /*
+           * Kalau LLM tidak memberikan target tetapi
+           * deterministic evidence menemukan target verified,
+           * kita JANGAN buang deterministic evidence.
+           */
+          if (!existingTarget && currentTarget) {
+            return false;
+          }
+        }
+
+        return false;
+      });
+
+      if (!isDuplicate) {
+        merged.push(evidence);
+      }
+    }
+
+    return merged;
+  }
+
+  private buildDeterministicActionDescription(
+    type:
+      | "X_FOLLOW"
+      | "X_LIKE"
+      | "X_REPOST"
+      | "X_COMMENT"
+      | "X_REPLY"
+      | "X_QUOTE",
+    sourceQuote: string,
+  ): string {
+    const action = this.humanizeXActionType(type);
+
+    return `${action} sesuai instruksi halaman: "${sourceQuote}"`;
+  }
+
+  private humanizeXActionType(type: string): string {
+    switch (type) {
+      case "X_FOLLOW":
+        return "Follow akun X";
+
+      case "X_LIKE":
+        return "Like postingan X";
+
+      case "X_REPOST":
+        return "Repost postingan X";
+
+      case "X_COMMENT":
+        return "Comment pada postingan X";
+
+      case "X_REPLY":
+        return "Reply pada postingan X";
+
+      case "X_QUOTE":
+        return "Quote postingan X";
+
+      default:
+        return type;
+    }
+  }
+
+  private detectXTargetKind(
+    targetUrl: string,
+  ): "X_PROFILE" | "X_STATUS" | "X_INTENT" | "UNKNOWN" {
+    if (this.isValidXStatusHref(targetUrl)) {
+      return "X_STATUS";
+    }
+
+    if (this.isValidXIntentHref(targetUrl)) {
+      return "X_INTENT";
+    }
+
+    if (this.isValidXProfileHref(targetUrl)) {
+      return "X_PROFILE";
+    }
+
+    return "UNKNOWN";
+  }
+
+  private findMatchingIntentUrl(
+    type:
+      | "X_FOLLOW"
+      | "X_LIKE"
+      | "X_REPOST"
+      | "X_COMMENT"
+      | "X_REPLY"
+      | "X_QUOTE",
+    intentUrls: string[],
+  ): string | null {
+    for (const url of intentUrls) {
+      const intentType = this.detectXIntentAction(url);
+
+      if (intentType === type) {
+        return url;
+      }
+    }
+
+    return null;
+  }
+
+  private detectXIntentAction(
+    href: string,
+  ): "X_FOLLOW" | "X_LIKE" | "X_REPOST" | "X_REPLY" | null {
+    let parsed: URL;
+
+    try {
+      parsed = new URL(href);
+    } catch {
+      return null;
+    }
+
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+
+    if (
+      hostname !== "x.com" &&
+      hostname !== "twitter.com" &&
+      hostname !== "mobile.twitter.com"
+    ) {
+      return null;
+    }
+
+    if (
+      parsed.pathname === "/intent/follow" &&
+      parsed.searchParams.has("screen_name")
+    ) {
+      return "X_FOLLOW";
+    }
+
+    if (
+      parsed.pathname === "/intent/like" &&
+      parsed.searchParams.has("tweet_id")
+    ) {
+      return "X_LIKE";
+    }
+
+    if (
+      parsed.pathname === "/intent/retweet" &&
+      parsed.searchParams.has("tweet_id")
+    ) {
+      return "X_REPOST";
+    }
+
+    if (
+      parsed.pathname === "/intent/tweet" &&
+      parsed.searchParams.has("in_reply_to")
+    ) {
+      return "X_REPLY";
+    }
+
+    return null;
+  }
+
+  private isValidXProfileHref(href: string): boolean {
+    let parsed: URL;
+
+    try {
+      parsed = new URL(href);
+    } catch {
+      return false;
+    }
+
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+
+    if (
+      hostname !== "x.com" &&
+      hostname !== "twitter.com" &&
+      hostname !== "mobile.twitter.com"
+    ) {
+      return false;
+    }
+
+    return this.isXProfileUrl(parsed);
+  }
+
+  private isValidXStatusHref(href: string): boolean {
+    let parsed: URL;
+
+    try {
+      parsed = new URL(href);
+    } catch {
+      return false;
+    }
+
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+
+    if (
+      hostname !== "x.com" &&
+      hostname !== "twitter.com" &&
+      hostname !== "mobile.twitter.com"
+    ) {
+      return false;
+    }
+
+    return this.isXStatusUrl(parsed);
+  }
+
+  private isValidXIntentHref(href: string): boolean {
+    let parsed: URL;
+
+    try {
+      parsed = new URL(href);
+    } catch {
+      return false;
+    }
+
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+
+    if (
+      hostname !== "x.com" &&
+      hostname !== "twitter.com" &&
+      hostname !== "mobile.twitter.com"
+    ) {
+      return false;
+    }
+
+    return parsed.pathname.startsWith("/intent/");
+  }
+
   private normalizeActionEvidence(
     evidence: TaskEvidence,
     sourceUrl: string,
@@ -999,9 +1532,7 @@ Return only evidence supported by the inspected page.
     return [
       {
         type: type as TaskRequirement["type"],
-
         description,
-
         targetUrl,
 
         producesOwnTweetUrl:
@@ -1299,10 +1830,8 @@ Return only evidence supported by the inspected page.
      * X_FOLLOW
      *
      * Bisa berupa:
-     *   https://x.com/arcroulette
-     *   https://x.com/intent/follow?screen_name=arcroulette
-     *
-     * Keduanya adalah target yang verified dari halaman.
+     * https://x.com/arcroulette
+     * https://x.com/intent/follow?screen_name=arcroulette
      */
     if (type === "X_FOLLOW") {
       if (this.isXProfileUrl(parsed)) {
@@ -1323,14 +1852,8 @@ Return only evidence supported by the inspected page.
      * Post-level X actions.
      *
      * Prioritas:
-     *
      * 1. Exact /status/ URL
      * 2. Verified X intent URL
-     *
-     * Kita TIDAK mengubah intent URL menjadi
-     * /status/ secara paksa karena intent URL
-     * yang ada belum tentu memberi canonical URL
-     * lengkap tanpa melakukan lookup tambahan.
      */
     if (
       type === "X_LIKE" ||
@@ -1344,8 +1867,7 @@ Return only evidence supported by the inspected page.
       }
 
       /*
-       * Like:
-       * https://x.com/intent/like?tweet_id=123
+       * Like
        */
       if (
         parsed.pathname === "/intent/like" &&
@@ -1355,8 +1877,7 @@ Return only evidence supported by the inspected page.
       }
 
       /*
-       * Repost:
-       * https://x.com/intent/retweet?tweet_id=123
+       * Repost
        */
       if (
         parsed.pathname === "/intent/retweet" &&
@@ -1366,8 +1887,7 @@ Return only evidence supported by the inspected page.
       }
 
       /*
-       * Reply:
-       * https://x.com/intent/tweet?in_reply_to=123
+       * Reply
        */
       if (
         parsed.pathname === "/intent/tweet" &&
@@ -1381,10 +1901,6 @@ Return only evidence supported by the inspected page.
 
     /*
      * X_POST
-     *
-     * Untuk standalone post, target URL
-     * memang bisa berupa URL X yang diberikan
-     * sebagai bagian requirement.
      */
     if (type === "X_POST") {
       return parsed.toString();
