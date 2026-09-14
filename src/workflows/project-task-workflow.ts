@@ -1,9 +1,11 @@
 import { AgentDatabase } from "../database/agent-database.js";
+
 import {
   TaskPlanner,
   type TaskPlan,
   type TaskPlannerInput,
 } from "../tasks/task-planner.js";
+
 import {
   TaskExecutor,
   type TaskExecutionReport,
@@ -28,7 +30,6 @@ export class ProjectTaskWorkflow {
     executor?: ProjectTaskWorkflowExecutor,
   ) {
     this.planner = planner ?? new TaskPlanner(database);
-
     this.executor = executor ?? new TaskExecutor(database);
   }
 
@@ -38,20 +39,82 @@ export class ProjectTaskWorkflow {
     return this.planner.createPlan(input);
   }
 
-  async executePlan(plan: TaskPlan): Promise<TaskExecutionReport> {
+  async executePlan(
+    plan: TaskPlan,
+    accountId?: number,
+  ): Promise<TaskExecutionReport> {
     this.validatePlan(plan);
 
-    return this.executor.executePlan(plan.tasks);
+    const executionPlan = this.filterPlanByAccount(plan, accountId);
+
+    this.validatePlan(executionPlan);
+
+    console.log(
+      accountId !== undefined
+        ? `🎯 [ProjectTaskWorkflow] Execution scope → account #${accountId}`
+        : `🎯 [ProjectTaskWorkflow] Execution scope → all accounts`,
+    );
+
+    console.log(
+      `📋 [ProjectTaskWorkflow] Tasks to execute: ${executionPlan.tasks.length}`,
+    );
+
+    return this.executor.executePlan(executionPlan.tasks);
   }
 
   async run(input: TaskPlannerInput): Promise<ProjectTaskWorkflowResult> {
     const plan = this.createPlan(input);
-
     const report = await this.executePlan(plan);
 
     return {
       plan,
       report,
+    };
+  }
+
+  private filterPlanByAccount(plan: TaskPlan, accountId?: number): TaskPlan {
+    if (accountId === undefined) {
+      return plan;
+    }
+
+    if (!Number.isInteger(accountId) || accountId <= 0) {
+      throw new Error("accountId wajib berupa angka integer positif.");
+    }
+
+    const filteredTasks = plan.tasks.filter(
+      (task) => task.accountId === accountId,
+    );
+
+    if (filteredTasks.length === 0) {
+      throw new Error(
+        `Task plan untuk project "${plan.projectName}" tidak memiliki task untuk account #${accountId}.`,
+      );
+    }
+
+    /**
+     * Karena execution scope hanya menjalankan satu account,
+     * semua dependency yang berasal dari account lain harus
+     * dianggap tidak relevan.
+     *
+     * Namun dependency antar-task dalam account yang sama
+     * tetap dipertahankan.
+     */
+    const filteredTaskIds = new Set(
+      filteredTasks.map((task) => task.planTaskId),
+    );
+
+    const scopedTasks = filteredTasks.map((task) => ({
+      ...task,
+      dependsOn: (task.dependsOn ?? []).filter((dependency) =>
+        filteredTaskIds.has(dependency),
+      ),
+    }));
+
+    return {
+      ...plan,
+      accountCount: 1,
+      taskCount: scopedTasks.length,
+      tasks: scopedTasks,
     };
   }
 

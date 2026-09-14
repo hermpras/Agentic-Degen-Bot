@@ -16,6 +16,7 @@ export function createProjectTaskPlanTool(
   llm: LLMProvider,
 ): Tool {
   const planner = new TaskPlanner(database);
+
   const analyzer = new ProjectTaskAnalyzer({
     browser,
     llm,
@@ -27,25 +28,29 @@ export function createProjectTaskPlanTool(
     description:
       "Menganalisis source URL project secara langsung menggunakan browser, " +
       "menemukan requirement task yang benar-benar terlihat di halaman, " +
-      "menormalisasikannya secara deterministic, membuat task plan untuk " +
-      "semua ACTIVE accounts, dan menyimpan plan ke database. " +
-      "Tool ini hanya membuat plan dan tidak mengeksekusi task.",
+      "menormalisasikannya secara deterministic, memastikan project tersimpan " +
+      "di database, membuat task plan untuk semua ACTIVE accounts, dan " +
+      "menyimpan plan ke database. Tool ini hanya membuat plan dan tidak " +
+      "mengeksekusi task.",
 
     riskLevel: "SAFE",
 
     parameters: {
       type: "object",
+
       properties: {
         projectName: {
           type: "string",
           description: "Nama project.",
         },
+
         sourceUrl: {
           type: "string",
           description:
             "URL halaman project yang menjadi sumber requirement task.",
         },
       },
+
       required: ["projectName", "sourceUrl"],
     },
 
@@ -77,15 +82,8 @@ export function createProjectTaskPlanTool(
         `🔎 [create_project_task_plan] Menganalisis source URL: ${sourceUrl}`,
       );
 
-      /*
+      /**
        * Browser lifecycle dibuat lazy/idempotent.
-       *
-       * BrowserExecutor.start() aman dipanggil berkali-kali:
-       * - kalau browser belum hidup -> browser dijalankan
-       * - kalau browser sudah hidup -> langsung return
-       *
-       * Dengan begitu tool tidak bergantung sepenuhnya pada lifecycle
-       * BrowserExecutor di agent-profiles.ts.
        */
       await browser.start();
 
@@ -93,30 +91,24 @@ export function createProjectTaskPlanTool(
         "🌐 [create_project_task_plan] Browser siap, menjalankan ProjectTaskAnalyzer...",
       );
 
-      /*
+      /**
        * Analyzer membaca halaman project secara langsung.
-       *
-       * Analyzer bertanggung jawab untuk:
-       * 1. membuka source URL
-       * 2. membaca page text + links
-       * 3. meminta LLM membuat grounded TaskEvidence
-       * 4. melakukan deterministic normalization
-       *
-       * Main Agent tidak mengirim evidence manual.
        */
       const plannerInput = await analyzer.analyze(sourceUrl);
 
-      /*
+      /**
        * Project name dari analyzer boleh dipakai jika valid.
-       * Namun fallback ke projectName yang diberikan tool tetap tersedia.
+       * Fallback ke projectName dari tool tetap tersedia.
        */
+      const normalizedProjectName =
+        typeof plannerInput.projectName === "string" &&
+        plannerInput.projectName.trim()
+          ? plannerInput.projectName.trim()
+          : projectName;
+
       const normalizedPlannerInput = {
         ...plannerInput,
-        projectName:
-          typeof plannerInput.projectName === "string" &&
-          plannerInput.projectName.trim()
-            ? plannerInput.projectName.trim()
-            : projectName,
+        projectName: normalizedProjectName,
         sourceUrl,
       };
 
@@ -124,14 +116,106 @@ export function createProjectTaskPlanTool(
         `🧠 [create_project_task_plan] Requirement ditemukan: ${normalizedPlannerInput.requirements.length}`,
       );
 
-      /*
-       * TaskPlanner membuat task deterministic berdasarkan:
-       * - requirement hasil analyzer
-       * - ACTIVE accounts dari database
+      /**
+       * ============================================================
+       * ENSURE PROJECT EXISTS
+       * ============================================================
+       *
+       * TaskExecutor nantinya mencari project berdasarkan nama.
+       *
+       * Sebelumnya create_project_task_plan hanya menyimpan:
+       *
+       *   task_plans
+       *
+       * tetapi tidak membuat:
+       *
+       *   projects
+       *
+       * Akibatnya execution plan berhasil dibuat tetapi gagal saat
+       * TaskExecutor mencoba mencari project.
+       *
+       * Sekarang project dipastikan ada terlebih dahulu.
+       */
+      const db = database.getDb();
+
+      const existingProject = db
+        .prepare(
+          `
+            SELECT
+              id,
+              name,
+              website_url AS websiteUrl
+            FROM projects
+            WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))
+            ORDER BY id DESC
+            LIMIT 1
+          `,
+        )
+        .get(normalizedProjectName) as
+        | {
+            id: number;
+            name: string;
+            websiteUrl: string | null;
+          }
+        | undefined;
+
+      let projectId: number;
+
+      if (existingProject) {
+        projectId = existingProject.id;
+
+        console.log(
+          `📁 [create_project_task_plan] Project ditemukan: #${projectId} "${existingProject.name}".`,
+        );
+
+        /**
+         * Jangan menghapus data project yang sudah ada.
+         *
+         * Website URL hanya diperbarui apabila kosong atau berbeda.
+         */
+        if (existingProject.websiteUrl !== sourceUrl) {
+          db.prepare(
+            `
+              UPDATE projects
+              SET
+                website_url = ?,
+                updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+            `,
+          ).run(sourceUrl, projectId);
+
+          console.log(
+            `🔄 [create_project_task_plan] Website URL project #${projectId} diperbarui.`,
+          );
+        }
+      } else {
+        const result = db
+          .prepare(
+            `
+              INSERT INTO projects (
+                name,
+                website_url
+              )
+              VALUES (?, ?)
+            `,
+          )
+          .run(normalizedProjectName, sourceUrl);
+
+        projectId = Number(result.lastInsertRowid);
+
+        console.log(
+          `🆕 [create_project_task_plan] Project baru dibuat: #${projectId} "${normalizedProjectName}".`,
+        );
+      }
+
+      /**
+       * ============================================================
+       * CREATE TASK PLAN
+       * ============================================================
        */
       const plan = planner.createPlan(normalizedPlannerInput);
 
-      /*
+      /**
        * Simpan plan ke database.
        */
       const planId = database.saveTaskPlan({
@@ -151,11 +235,16 @@ export function createProjectTaskPlanTool(
         {
           success: true,
           message: "Task plan berhasil dibuat dan disimpan.",
+
           planId,
+          projectId,
+
           projectName: plan.projectName,
           sourceUrl: plan.sourceUrl,
+
           accountCount: plan.accountCount,
           taskCount: plan.taskCount,
+
           tasks: plan.tasks,
         },
         null,

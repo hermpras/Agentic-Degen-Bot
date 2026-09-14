@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, FunctionCallingConfigMode } from "@google/genai";
 
 import {
   LLMProvider,
@@ -12,7 +12,9 @@ export class GeminiProvider implements LLMProvider {
   readonly name = "gemini";
 
   private ai: GoogleGenAI;
+
   private primaryModel: string;
+
   private fallbackModels: string[];
 
   constructor(apiKey: string, modelName = "gemini-3.5-flash") {
@@ -162,12 +164,44 @@ export class GeminiProvider implements LLMProvider {
 
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
+          /**
+           * Gemini function calling configuration.
+           *
+           * AUTO:
+           *   default behavior, LLM boleh memilih tool atau final answer.
+           *
+           * ANY:
+           *   LLM wajib menghasilkan function call.
+           *
+           * NONE:
+           *   LLM tidak menggunakan function call.
+           */
+          const functionCallingConfig: {
+            mode: FunctionCallingConfigMode;
+          } =
+            options.toolChoice === "ANY"
+              ? {
+                  mode: FunctionCallingConfigMode.ANY,
+                }
+              : options.toolChoice === "NONE"
+                ? {
+                    mode: FunctionCallingConfigMode.NONE,
+                  }
+                : {
+                    mode: FunctionCallingConfigMode.AUTO,
+                  };
+
           const response = await this.ai.models.generateContent({
             model,
             contents,
             config: {
               tools: geminiTools,
               systemInstruction: options.systemInstruction,
+              toolConfig: geminiTools
+                ? {
+                    functionCallingConfig,
+                  }
+                : undefined,
             },
           });
 
@@ -182,12 +216,14 @@ export class GeminiProvider implements LLMProvider {
                 name: functionCall.name || "",
                 args: (functionCall.args as Record<string, any>) || {},
               })),
+
               rawResponse: candidate?.content,
             };
           }
 
           return {
             text: response.text ?? "",
+
             rawResponse: candidate?.content,
           };
         } catch (error: any) {

@@ -9,15 +9,10 @@ export interface ProjectTaskAnalyzerOptions {
 
 interface TaskEvidence {
   kind: "ACTION" | "FORM" | "CONTEXT";
-
   description: string;
-
   sourceQuote: string;
-
   actionType?: string;
-
   targetUrl?: string | null;
-
   targetKind?:
     | "X_PROFILE"
     | "X_STATUS"
@@ -25,25 +20,18 @@ interface TaskEvidence {
     | "WEBSITE"
     | "GOOGLE_FORM"
     | "UNKNOWN";
-
   producesOwnTweetUrl?: boolean;
-
   requiresOwnTweetUrl?: boolean;
-
   walletInteraction?: "NONE" | "CONNECT" | "SIGN" | "APPROVE" | "UNKNOWN";
-
   form?: {
     formType?: "WEBSITE" | "GOOGLE_FORM";
-
     targetUrl?: string;
-
     fields?: Array<{
       type?: string;
       label?: string;
       required?: boolean;
       value?: string | null;
     }>;
-
     checkboxes?: Array<{
       type?: string;
       label?: string;
@@ -60,6 +48,7 @@ interface AnalyzeProjectArgs {
 }
 
 const X_TASK_TYPES = new Set([
+  "X_CONNECT",
   "X_FOLLOW",
   "X_LIKE",
   "X_REPOST",
@@ -69,16 +58,9 @@ const X_TASK_TYPES = new Set([
   "X_POST",
 ]);
 
-const X_POST_ACTION_TYPES = new Set([
-  "X_LIKE",
-  "X_REPOST",
-  "X_COMMENT",
-  "X_REPLY",
-  "X_QUOTE",
-]);
-
 const SUPPORTED_TASK_TYPES = new Set([
   "OPEN_PAGE",
+  "X_CONNECT",
   "X_FOLLOW",
   "X_LIKE",
   "X_REPOST",
@@ -165,18 +147,27 @@ export class ProjectTaskAnalyzer {
 
     const args = this.extractToolArguments(result);
 
-    /*
-     * LLM evidence tetap menjadi sumber utama interpretasi.
-     *
-     * Tetapi action X yang benar-benar terlihat di halaman juga kita
-     * ekstrak secara deterministic dari page text + discovered links.
-     *
-     * Tujuannya supaya satu missed action dari LLM tidak membuat
-     * requirement hilang seluruhnya.
-     */
+    console.log(
+      `🧠 [ProjectTaskAnalyzer] LLM evidence: ${args.evidence?.length ?? 0}`,
+    );
+
+    for (const [index, evidence] of (args.evidence ?? []).entries()) {
+      console.log(
+        `   🤖 LLM #${index + 1}: ` +
+          `kind=${evidence.kind} | ` +
+          `action=${evidence.actionType ?? "-"} | ` +
+          `target=${evidence.targetUrl ?? "-"} | ` +
+          `description="${evidence.description}"`,
+      );
+    }
+
     const deterministicEvidence = this.extractDeterministicXEvidence(
       page.text,
       page.links,
+    );
+
+    console.log(
+      `🧭 [ProjectTaskAnalyzer] Deterministic evidence total: ${deterministicEvidence.length}`,
     );
 
     if (deterministicEvidence.length > 0) {
@@ -193,6 +184,20 @@ export class ProjectTaskAnalyzer {
       args.evidence,
       deterministicEvidence,
     );
+
+    console.log(
+      `🔀 [ProjectTaskAnalyzer] Merged evidence: ${mergedEvidence.length}`,
+    );
+
+    for (const [index, evidence] of mergedEvidence.entries()) {
+      console.log(
+        `   📦 MERGED #${index + 1}: ` +
+          `kind=${evidence.kind} | ` +
+          `action=${evidence.actionType ?? "-"} | ` +
+          `target=${evidence.targetUrl ?? "-"} | ` +
+          `description="${evidence.description}"`,
+      );
+    }
 
     return this.validateAndNormalizeResult(
       {
@@ -315,6 +320,7 @@ Only ACTION and FORM evidence will normally become executable tasks.
 SUPPORTED ACTION TYPES:
 
 OPEN_PAGE
+X_CONNECT
 X_FOLLOW
 X_LIKE
 X_REPOST
@@ -324,6 +330,36 @@ X_QUOTE
 X_POST
 WHITELIST
 CUSTOM
+
+X_CONNECT SEMANTICS:
+
+Use X_CONNECT when the page explicitly requires the user to authenticate,
+connect, sign in, log in, continue with, authorize, or otherwise connect
+their X/Twitter account.
+
+Examples:
+
+"Connect with X"
+"Connect your X account"
+"Sign in with X"
+"Login with X"
+"Continue with X"
+"Authorize with X"
+"Authenticate with X/Twitter"
+
+X_CONNECT is different from X_FOLLOW, X_LIKE, X_REPOST, X_COMMENT,
+X_REPLY, X_QUOTE, and X_POST.
+
+X_CONNECT does NOT require an x.com URL.
+
+A project-owned OAuth/start URL such as:
+
+https://example.com/auth/x/start
+
+is a valid target for X_CONNECT when it is actually present in the
+inspected page context.
+
+Do not invent such URLs.
 
 SUPPORTED FORM TYPES:
 
@@ -372,17 +408,6 @@ must become:
 
 Do NOT turn the whole sentence into X_REPLY.
 
-Another example:
-
-"Like & Repost pinned post"
-
-must become:
-
-1. X_LIKE
-2. X_REPOST
-
-Do not collapse them.
-
 COMMENT VS REPLY:
 
 If the project explicitly says "comment", use X_COMMENT.
@@ -403,6 +428,7 @@ Only X_POST can normally produce an own tweet URL.
 
 producesOwnTweetUrl must NOT be used for:
 
+- X_CONNECT
 - X_FOLLOW
 - X_LIKE
 - X_REPOST
@@ -411,6 +437,12 @@ producesOwnTweetUrl must NOT be used for:
 - X_QUOTE
 
 X TARGETS:
+
+For X_CONNECT:
+
+- Prefer the exact project-owned authentication/start URL when discovered.
+- Do not require the URL to be hosted on x.com.
+- Do not invent an OAuth URL.
 
 For X_FOLLOW:
 
@@ -500,8 +532,8 @@ page supporting the requirement.
 Do not create an evidence item merely because something seems common for
 NFT whitelist projects.
 
-For every target URL, use only URLs actually present in the inspected
-page context or the current page URL when it is genuinely the target.
+For every target URL, use only URLs actually present in the inspected page
+context or the current page URL when it is genuinely the target.
 
 Do not invent URLs.
 
@@ -584,6 +616,36 @@ For every actionable requirement:
 - provide the most specific verified target URL available
 - do not invent missing URLs
 
+X CONNECTION:
+
+If the page explicitly says:
+
+- Connect with X
+- Connect your X account
+- Sign in with X
+- Login with X
+- Continue with X
+- Authorize with X
+- Authenticate with X/Twitter
+
+create:
+
+X_CONNECT
+
+If the page provides a project-owned URL such as:
+
+/auth/x/start
+/auth/twitter/start
+/login/x
+/connect/x
+
+that URL may be the target of X_CONNECT if it is actually present in
+the inspected page context.
+
+Do NOT require an x.com URL for X_CONNECT.
+
+Do NOT confuse X_CONNECT with X_FOLLOW.
+
 For X actions:
 
 - Follow => X_FOLLOW
@@ -606,15 +668,6 @@ X_LIKE
 X_REPOST
 X_COMMENT
 
-Example:
-
-"Like & Repost pinned post"
-
-must become:
-
-X_LIKE
-X_REPOST
-
 For post-level X actions, inspect DISCOVERED PAGE LINKS and prefer an exact
 /status/ URL when one exists.
 
@@ -622,8 +675,13 @@ If no exact X post URL exists, DO NOT invent one.
 
 For X_FOLLOW, an X profile URL is valid.
 
-Do not use an X profile URL as the target for
-X_LIKE/X_REPOST/X_COMMENT/X_REPLY/X_QUOTE.
+Do not use an X profile URL as the target for:
+
+X_LIKE
+X_REPOST
+X_COMMENT
+X_REPLY
+X_QUOTE
 
 WALLET:
 
@@ -674,41 +732,35 @@ Return only evidence supported by the inspected page.
             type: "string" as const,
             description: "Project name.",
           },
-
           sourceUrl: {
             type: "string" as const,
             description: "Original project URL.",
           },
-
           evidence: {
             type: "array" as const,
             description:
               "Intermediate evidence describing actionable requirements and relevant context.",
-
             items: {
               type: "object" as const,
-
               properties: {
                 kind: {
                   type: "string" as const,
                   enum: ["ACTION", "FORM", "CONTEXT"],
                 },
-
                 description: {
                   type: "string" as const,
                   description: "Human-readable description of the evidence.",
                 },
-
                 sourceQuote: {
                   type: "string" as const,
                   description:
                     "Short quote or faithful excerpt from the page supporting this evidence.",
                 },
-
                 actionType: {
                   type: "string" as const,
                   enum: [
                     "OPEN_PAGE",
+                    "X_CONNECT",
                     "X_FOLLOW",
                     "X_LIKE",
                     "X_REPOST",
@@ -720,13 +772,11 @@ Return only evidence supported by the inspected page.
                     "CUSTOM",
                   ],
                 },
-
                 targetUrl: {
                   type: "string" as const,
                   description:
                     "Verified target URL discovered from the page, if available.",
                 },
-
                 targetKind: {
                   type: "string" as const,
                   enum: [
@@ -738,43 +788,34 @@ Return only evidence supported by the inspected page.
                     "UNKNOWN",
                   ],
                 },
-
                 producesOwnTweetUrl: {
                   type: "boolean" as const,
                   description:
                     "True only when this action creates a standalone X post.",
                 },
-
                 requiresOwnTweetUrl: {
                   type: "boolean" as const,
                   description:
                     "True only when this requirement explicitly needs a previously created standalone X post URL.",
                 },
-
                 walletInteraction: {
                   type: "string" as const,
                   enum: ["NONE", "CONNECT", "SIGN", "APPROVE", "UNKNOWN"],
                 },
-
                 form: {
                   type: "object" as const,
-
                   properties: {
                     formType: {
                       type: "string" as const,
                       enum: ["WEBSITE", "GOOGLE_FORM"],
                     },
-
                     targetUrl: {
                       type: "string" as const,
                     },
-
                     fields: {
                       type: "array" as const,
-
                       items: {
                         type: "object" as const,
-
                         properties: {
                           type: {
                             type: "string" as const,
@@ -790,30 +831,23 @@ Return only evidence supported by the inspected page.
                               "CUSTOM",
                             ],
                           },
-
                           label: {
                             type: "string" as const,
                           },
-
                           required: {
                             type: "boolean" as const,
                           },
-
                           value: {
                             type: "string" as const,
                           },
                         },
-
                         required: ["type"],
                       },
                     },
-
                     checkboxes: {
                       type: "array" as const,
-
                       items: {
                         type: "object" as const,
-
                         properties: {
                           type: {
                             type: "string" as const,
@@ -827,37 +861,29 @@ Return only evidence supported by the inspected page.
                               "CUSTOM",
                             ],
                           },
-
                           label: {
                             type: "string" as const,
                           },
-
                           required: {
                             type: "boolean" as const,
                           },
-
                           checked: {
                             type: "boolean" as const,
                           },
                         },
-
                         required: ["type"],
                       },
                     },
                   },
-
                   required: ["formType", "targetUrl"],
                 },
               },
-
               required: ["kind", "description", "sourceQuote"],
             },
           },
         },
-
         required: ["projectName", "sourceUrl", "evidence"],
       },
-
       async execute() {
         throw new Error(
           "create_project_task_plan hanya boleh dipanggil sebagai structured analyzer output.",
@@ -880,19 +906,10 @@ Return only evidence supported by the inspected page.
     return toolCall.args as AnalyzeProjectArgs;
   }
 
-  /**
-   * Public static entry point.
-   *
-   * Dipakai oleh create-project-task-plan.tool.ts
-   * ketika LLM sudah menghasilkan evidence.
-   *
-   * Tidak membuka browser dan tidak memanggil LLM lagi.
-   */
   static normalizeEvidenceToTaskPlannerInput(
     args: AnalyzeProjectArgs,
   ): TaskPlannerInput {
     const projectName = String(args.projectName ?? "").trim();
-
     const sourceUrl = String(args.sourceUrl ?? "").trim();
 
     if (!projectName) {
@@ -911,12 +928,6 @@ Return only evidence supported by the inspected page.
 
     const requirements: TaskRequirement[] = [];
 
-    /**
-     * Kita pakai helper instance-less.
-     *
-     * Semua method normalisasi di bawah ini
-     * tidak bergantung pada browser atau LLM.
-     */
     const normalizer = Object.create(
       ProjectTaskAnalyzer.prototype,
     ) as ProjectTaskAnalyzer;
@@ -939,7 +950,6 @@ Return only evidence supported by the inspected page.
       }
 
       const description = String(evidence.description ?? "").trim();
-
       const sourceQuote = String(evidence.sourceQuote ?? "").trim();
 
       if (!description) {
@@ -998,16 +1008,6 @@ Return only evidence supported by the inspected page.
     });
   }
 
-  /**
-   * Extract X actions deterministically dari halaman yang benar-benar
-   * sudah dibaca browser.
-   *
-   * Prinsip:
-   * - hanya mencari action verb yang nyata di page text
-   * - hanya menggunakan URL X yang benar-benar ditemukan
-   * - tidak membuat tweet/status ID
-   * - tidak menganggap setiap mention "X/Twitter" sebagai task
-   */
   private extractDeterministicXEvidence(
     text: string,
     links: Array<{
@@ -1029,7 +1029,6 @@ Return only evidence supported by the inspected page.
         text: String(link.text ?? "")
           .replace(/\s+/g, " ")
           .trim(),
-
         href: String(link.href ?? "").trim(),
       }))
       .filter((link) => link.href);
@@ -1046,22 +1045,169 @@ Return only evidence supported by the inspected page.
       .map((link) => link.href)
       .filter((href) => this.isValidXIntentHref(href));
 
-    const targetStatusUrl = xStatusUrls.length > 0 ? xStatusUrls[0] : null;
+    const targetStatusUrl = xStatusUrls[0] ?? null;
+    const targetProfileUrl = xProfileUrls[0] ?? null;
 
-    const targetProfileUrl = xProfileUrls.length > 0 ? xProfileUrls[0] : null;
+    console.log(
+      `🔍 [ProjectTaskAnalyzer] X links: profiles=${xProfileUrls.length}, statuses=${xStatusUrls.length}, intents=${xIntentUrls.length}`,
+    );
+
+    if (targetStatusUrl) {
+      console.log(
+        `🎯 [ProjectTaskAnalyzer] X status target ditemukan: ${targetStatusUrl}`,
+      );
+    }
+
+    if (targetProfileUrl) {
+      console.log(
+        `👤 [ProjectTaskAnalyzer] X profile target ditemukan: ${targetProfileUrl}`,
+      );
+    }
 
     const evidence: TaskEvidence[] = [];
 
-    /*
-     * Pecah page text menjadi unit yang lebih kecil.
-     *
-     * Ini penting supaya kata "like" yang muncul jauh di bagian
-     * background project tidak otomatis dianggap task.
-     */
     const textUnits = normalizedText
       .split(/\n+|(?<=[.!?])\s+/)
       .map((unit) => unit.trim())
       .filter(Boolean);
+
+    /*
+     * ------------------------------------------------------------
+     * X CONNECT
+     * ------------------------------------------------------------
+     *
+     * Ini berbeda dari social action biasa.
+     *
+     * Contoh:
+     *
+     * "Connect with X account"
+     * "Sign in with X"
+     * "Continue with X"
+     *
+     * Target dapat berupa project-owned OAuth/start endpoint:
+     *
+     * https://example.com/auth/x/start
+     *
+     * URL tersebut TIDAK harus x.com.
+     */
+
+    const xConnectPatterns = [
+      /\bconnect\s+(?:with|your|to)\s+x\b/i,
+      /\bconnect\s+(?:with|your|to)\s+(?:an?\s+)?x\s+account\b/i,
+      /\bconnect\s+(?:with|your|to)\s+(?:an?\s+)?twitter\s+account\b/i,
+      /\bsign\s*[- ]?in\s+with\s+x\b/i,
+      /\blog\s*[- ]?in\s+with\s+x\b/i,
+      /\bcontinue\s+with\s+x\b/i,
+      /\bauthori[sz]e\s+(?:with\s+)?x\b/i,
+      /\bauthenticate\s+(?:with\s+)?x\b/i,
+      /\bconnect\s+x\s+account\b/i,
+    ];
+
+    const xAuthLinkCandidates = normalizedLinks.filter((link) =>
+      this.isLikelyXAuthUrl(link.href, link.text),
+    );
+
+    const xAuthTargetUrl = xAuthLinkCandidates[0]?.href ?? null;
+
+    for (const unit of textUnits) {
+      const matchedConnect = xConnectPatterns.some((pattern) =>
+        pattern.test(unit),
+      );
+
+      if (!matchedConnect) {
+        continue;
+      }
+
+      const nearbyText = [
+        unit,
+        textUnits[textUnits.indexOf(unit) - 1] ?? "",
+        textUnits[textUnits.indexOf(unit) + 1] ?? "",
+      ].join(" ");
+
+      const nearbyAuthLink =
+        xAuthLinkCandidates.find((link) =>
+          this.textContainsAny(`${link.text} ${link.href}`, [
+            "x",
+            "twitter",
+            "auth/x",
+            "auth/twitter",
+            "login/x",
+            "login/twitter",
+            "connect/x",
+            "connect/twitter",
+          ]),
+        ) ?? null;
+
+      const targetUrl =
+        nearbyAuthLink?.href ??
+        xAuthTargetUrl ??
+        this.findXAuthUrlFromText(normalizedText);
+
+      evidence.push({
+        kind: "ACTION",
+        description: `Connect dengan akun X sesuai instruksi halaman: "${unit}"`,
+        sourceQuote: unit,
+        actionType: "X_CONNECT",
+        targetUrl,
+        targetKind: targetUrl ? "WEBSITE" : "UNKNOWN",
+        producesOwnTweetUrl: false,
+        requiresOwnTweetUrl: false,
+        walletInteraction: "NONE",
+      });
+
+      void nearbyText;
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * X AUTH LINK FALLBACK
+     * ------------------------------------------------------------
+     *
+     * Kalau button/link hanya terlihat di discovered links dan teks
+     * utamanya tidak terbaca sempurna, link auth X tetap bisa menjadi
+     * evidence selama visible text / URL cukup jelas.
+     */
+
+    for (const link of xAuthLinkCandidates) {
+      const combined = `${link.text} ${link.href}`;
+
+      if (
+        !this.textContainsAny(combined, [
+          "x",
+          "twitter",
+          "auth/x",
+          "auth/twitter",
+          "login/x",
+          "login/twitter",
+          "connect/x",
+          "connect/twitter",
+        ])
+      ) {
+        continue;
+      }
+
+      const hasConnectLanguage =
+        /\b(connect|sign[\s-]?in|login|log[\s-]?in|continue|authorize|authenticate)\b/i.test(
+          combined,
+        );
+
+      if (!hasConnectLanguage) {
+        continue;
+      }
+
+      evidence.push({
+        kind: "ACTION",
+        description:
+          "Connect dengan akun X menggunakan authentication link yang ditemukan di halaman.",
+        sourceQuote: link.text || "X authentication link ditemukan di halaman.",
+        actionType: "X_CONNECT",
+        targetUrl: link.href,
+        targetKind: "WEBSITE",
+        producesOwnTweetUrl: false,
+        requiresOwnTweetUrl: false,
+        walletInteraction: "NONE",
+      });
+    }
 
     const actionDetectors: Array<{
       type:
@@ -1071,70 +1217,130 @@ Return only evidence supported by the inspected page.
         | "X_COMMENT"
         | "X_REPLY"
         | "X_QUOTE";
-
       regex: RegExp;
-
-      labels: string[];
     }> = [
       {
         type: "X_FOLLOW",
         regex:
           /\b(?:follow|follow\s+us|follow\s+our|follow\s+on\s+x|follow\s+on\s+twitter)\b/i,
-        labels: ["follow"],
       },
-
       {
         type: "X_LIKE",
-        regex: /\b(?:like|like\s+this|like\s+the|like\s+our)\b/i,
-        labels: ["like"],
+        regex: /\b(?:like|liked|liking)\b/i,
       },
-
       {
         type: "X_REPOST",
-        regex: /\b(?:repost|retweet|retweeting|rt)\b/i,
-        labels: ["repost", "retweet", "rt"],
+        regex: /\b(?:repost|retweet|retweeting|retweeted|rt)\b/i,
       },
-
       {
         type: "X_COMMENT",
         regex:
-          /\b(?:comment|comment\s+on|leave\s+a\s+comment|drop\s+a\s+comment)\b/i,
-        labels: ["comment"],
+          /\b(?:comment|comments|commenting|leave\s+a\s+comment|drop\s+a\s+comment)\b/i,
       },
-
       {
         type: "X_REPLY",
-        regex: /\b(?:reply|reply\s+to|replying)\b/i,
-        labels: ["reply"],
+        regex: /\b(?:reply|reply\s+to|replying|replied)\b/i,
       },
-
       {
         type: "X_QUOTE",
-        regex: /\b(?:quote|quote\s+tweet|quote\s+this|quote\s+the)\b/i,
-        labels: ["quote"],
+        regex:
+          /\b(?:quote|quote\s+tweet|quote\s+this|quote\s+the|quote-tweet)\b/i,
       },
     ];
 
-    for (const unit of textUnits) {
-      const hasXContext =
-        /\b(?:x\.com|twitter\.com|twitter|tweet|tweeting|post|pinned post|pinned tweet|social)\b/i.test(
-          unit,
+    const pageHasExplicitXContext =
+      /\b(?:x\.com|twitter\.com|twitter|on\s+x|on\s+twitter)\b/i.test(
+        normalizedText,
+      );
+
+    const pageHasStrongXTarget =
+      Boolean(targetStatusUrl) ||
+      Boolean(targetProfileUrl) ||
+      xIntentUrls.length > 0;
+
+    const instructionSignals =
+      /\b(?:must|required|requirement|requirements|task|tasks|step|steps|do|please|complete|complete\s+the|to\s+qualify|qualify|eligible|eligibility|whitelist|quest|action|actions|follow|like|repost|retweet|comment|reply|quote|pinned|post|tweet|announcement)\b/i;
+
+    for (let index = 0; index < textUnits.length; index += 1) {
+      const unit = textUnits[index];
+
+      const previousUnit = textUnits[index - 1] ?? "";
+      const nextUnit = textUnits[index + 1] ?? "";
+
+      const localContext = `${previousUnit} ${unit} ${nextUnit}`;
+
+      const hasLocalXContext =
+        /\b(?:x\.com|twitter\.com|twitter|tweet|tweeting|post|pinned\s+post|pinned\s+tweet|social)\b/i.test(
+          localContext,
         );
 
-      if (!hasXContext) {
-        continue;
-      }
+      const looksLikeInstruction = instructionSignals.test(unit);
 
       for (const detector of actionDetectors) {
         if (!detector.regex.test(unit)) {
           continue;
         }
 
+        if (detector.type === "X_FOLLOW") {
+          const followTarget =
+            targetProfileUrl ??
+            this.findMatchingIntentUrl("X_FOLLOW", xIntentUrls);
+
+          if (!followTarget) {
+            if (!pageHasExplicitXContext && !hasLocalXContext) {
+              continue;
+            }
+
+            evidence.push({
+              kind: "ACTION",
+              description: this.buildDeterministicActionDescription(
+                detector.type,
+                unit,
+              ),
+              sourceQuote: unit,
+              actionType: detector.type,
+              targetUrl: null,
+              targetKind: "UNKNOWN",
+              producesOwnTweetUrl: false,
+              requiresOwnTweetUrl: false,
+              walletInteraction: "NONE",
+            });
+
+            continue;
+          }
+
+          evidence.push({
+            kind: "ACTION",
+            description: this.buildDeterministicActionDescription(
+              detector.type,
+              unit,
+            ),
+            sourceQuote: unit,
+            actionType: detector.type,
+            targetUrl: followTarget,
+            targetKind: this.detectXTargetKind(followTarget),
+            producesOwnTweetUrl: false,
+            requiresOwnTweetUrl: false,
+            walletInteraction: "NONE",
+          });
+
+          continue;
+        }
+
         const targetUrl =
-          detector.type === "X_FOLLOW"
-            ? targetProfileUrl
-            : (targetStatusUrl ??
-              this.findMatchingIntentUrl(detector.type, xIntentUrls));
+          targetStatusUrl ??
+          this.findMatchingIntentUrl(detector.type, xIntentUrls);
+
+        const hasGrounding =
+          Boolean(targetUrl) || pageHasExplicitXContext || hasLocalXContext;
+
+        if (!hasGrounding) {
+          continue;
+        }
+
+        if (!targetUrl && !looksLikeInstruction) {
+          continue;
+        }
 
         evidence.push({
           kind: "ACTION",
@@ -1154,15 +1360,134 @@ Return only evidence supported by the inspected page.
     }
 
     /*
-     * Ada halaman yang menampilkan action sebagai link text,
-     * sementara kalimat instruksi tidak menyebut "X/Twitter".
-     *
-     * Contoh:
-     *   [Like] https://x.com/intent/like?tweet_id=...
-     *
-     * Link intent seperti ini adalah bukti langsung yang jauh lebih
-     * kuat daripada sekadar kata "like" di halaman.
+     * Exact X status URL fallback.
      */
+
+    if (targetStatusUrl) {
+      const statusActionPatterns: Array<{
+        type: "X_LIKE" | "X_REPOST" | "X_COMMENT" | "X_REPLY" | "X_QUOTE";
+        regex: RegExp;
+      }> = [
+        {
+          type: "X_LIKE",
+          regex: /\b(?:like|liked|liking)\b/i,
+        },
+        {
+          type: "X_REPOST",
+          regex: /\b(?:repost|retweet|retweeting|retweeted|rt)\b/i,
+        },
+        {
+          type: "X_COMMENT",
+          regex:
+            /\b(?:comment|comments|commenting|leave\s+a\s+comment|drop\s+a\s+comment)\b/i,
+        },
+        {
+          type: "X_REPLY",
+          regex: /\b(?:reply|reply\s+to|replying|replied)\b/i,
+        },
+        {
+          type: "X_QUOTE",
+          regex:
+            /\b(?:quote|quote\s+tweet|quote\s+this|quote\s+the|quote-tweet)\b/i,
+        },
+      ];
+
+      const candidateUnits = textUnits.filter((unit) =>
+        instructionSignals.test(unit),
+      );
+
+      for (const unit of candidateUnits) {
+        for (const detector of statusActionPatterns) {
+          if (!detector.regex.test(unit)) {
+            continue;
+          }
+
+          evidence.push({
+            kind: "ACTION",
+            description: this.buildDeterministicActionDescription(
+              detector.type,
+              unit,
+            ),
+            sourceQuote: unit,
+            actionType: detector.type,
+            targetUrl: targetStatusUrl,
+            targetKind: "X_STATUS",
+            producesOwnTweetUrl: false,
+            requiresOwnTweetUrl: false,
+            walletInteraction: "NONE",
+          });
+        }
+      }
+    }
+
+    /*
+     * Page-level fallback.
+     */
+
+    if (targetStatusUrl) {
+      const pageLevelActionPatterns: Array<{
+        type: "X_LIKE" | "X_REPOST" | "X_COMMENT" | "X_REPLY" | "X_QUOTE";
+        regex: RegExp;
+      }> = [
+        {
+          type: "X_LIKE",
+          regex: /\b(?:like|liked|liking)\b/i,
+        },
+        {
+          type: "X_REPOST",
+          regex: /\b(?:repost|retweet|retweeting|retweeted|rt)\b/i,
+        },
+        {
+          type: "X_COMMENT",
+          regex: /\b(?:comment|comments|commenting)\b/i,
+        },
+        {
+          type: "X_REPLY",
+          regex: /\b(?:reply|replying|replied)\b/i,
+        },
+        {
+          type: "X_QUOTE",
+          regex: /\b(?:quote|quoting|quoted)\b/i,
+        },
+      ];
+
+      const pageLooksLikeTaskPage =
+        /\b(?:task|tasks|requirement|requirements|quest|whitelist|steps|complete|qualify|eligible|eligibility)\b/i.test(
+          normalizedText,
+        );
+
+      if (pageLooksLikeTaskPage) {
+        for (const detector of pageLevelActionPatterns) {
+          const matchedUnit = textUnits.find((unit) =>
+            detector.regex.test(unit),
+          );
+
+          if (!matchedUnit) {
+            continue;
+          }
+
+          evidence.push({
+            kind: "ACTION",
+            description: this.buildDeterministicActionDescription(
+              detector.type,
+              matchedUnit,
+            ),
+            sourceQuote: matchedUnit,
+            actionType: detector.type,
+            targetUrl: targetStatusUrl,
+            targetKind: "X_STATUS",
+            producesOwnTweetUrl: false,
+            requiresOwnTweetUrl: false,
+            walletInteraction: "NONE",
+          });
+        }
+      }
+    }
+
+    /*
+     * X intent links.
+     */
+
     for (const link of normalizedLinks) {
       const intentType = this.detectXIntentAction(link.href);
 
@@ -1174,9 +1499,7 @@ Return only evidence supported by the inspected page.
 
       evidence.push({
         kind: "ACTION",
-        description: `${this.humanizeXActionType(
-          intentType,
-        )} menggunakan link X yang ditemukan di halaman.`,
+        description: `${this.humanizeXActionType(intentType)} menggunakan link X yang ditemukan di halaman.`,
         sourceQuote: visibleLabel,
         actionType: intentType,
         targetUrl: link.href,
@@ -1188,8 +1511,40 @@ Return only evidence supported by the inspected page.
     }
 
     /*
-     * Dedupe berdasarkan action + target + sourceQuote.
+     * Follow fallback.
      */
+
+    if (targetProfileUrl) {
+      const followUnits = textUnits.filter((unit) => /\bfollow\b/i.test(unit));
+
+      for (const unit of followUnits) {
+        evidence.push({
+          kind: "ACTION",
+          description: this.buildDeterministicActionDescription(
+            "X_FOLLOW",
+            unit,
+          ),
+          sourceQuote: unit,
+          actionType: "X_FOLLOW",
+          targetUrl: targetProfileUrl,
+          targetKind: "X_PROFILE",
+          producesOwnTweetUrl: false,
+          requiresOwnTweetUrl: false,
+          walletInteraction: "NONE",
+        });
+      }
+    }
+
+    /*
+     * Prevent unused semantic variable warnings while retaining the
+     * page-level grounding calculation for future deterministic rules.
+     */
+    void pageHasStrongXTarget;
+
+    /*
+     * Dedupe.
+     */
+
     const unique = new Map<string, TaskEvidence>();
 
     for (const item of evidence) {
@@ -1205,13 +1560,9 @@ Return only evidence supported by the inspected page.
     }
 
     /*
-     * Jangan hasilkan duplicate action yang sama hanya karena satu
-     * halaman memiliki beberapa kalimat yang semuanya mengandung
-     * kata "like".
-     *
-     * Jika sudah ada evidence dengan target status yang sama,
-     * prioritaskan evidence tersebut.
+     * Prefer the same action with a verified target.
      */
+
     const dedupedByActionAndTarget = new Map<string, TaskEvidence>();
 
     for (const item of unique.values()) {
@@ -1233,7 +1584,41 @@ Return only evidence supported by the inspected page.
       }
     }
 
-    return Array.from(dedupedByActionAndTarget.values());
+    /*
+     * Final pass:
+     *
+     * same action without target vs same action with target
+     * => prefer the targeted version.
+     */
+
+    const finalByAction = new Map<string, TaskEvidence>();
+
+    for (const item of dedupedByActionAndTarget.values()) {
+      const actionType = item.actionType ?? "";
+
+      const existing = finalByAction.get(actionType);
+
+      if (!existing) {
+        finalByAction.set(actionType, item);
+        continue;
+      }
+
+      const existingHasTarget = Boolean(existing.targetUrl);
+
+      const currentHasTarget = Boolean(item.targetUrl);
+
+      if (!existingHasTarget && currentHasTarget) {
+        finalByAction.set(actionType, item);
+      }
+    }
+
+    const result = Array.from(finalByAction.values());
+
+    console.log(
+      `🧭 [ProjectTaskAnalyzer] Deterministic extractor menghasilkan ${result.length} X evidence.`,
+    );
+
+    return result;
   }
 
   private mergeEvidence(
@@ -1271,10 +1656,6 @@ Return only evidence supported by the inspected page.
 
           const currentTarget = String(evidence.targetUrl ?? "").trim();
 
-          /*
-           * Kalau keduanya menunjuk target yang sama,
-           * anggap duplicate.
-           */
           if (
             existingTarget &&
             currentTarget &&
@@ -1283,11 +1664,6 @@ Return only evidence supported by the inspected page.
             return true;
           }
 
-          /*
-           * Kalau LLM tidak memberikan target tetapi
-           * deterministic evidence menemukan target verified,
-           * kita JANGAN buang deterministic evidence.
-           */
           if (!existingTarget && currentTarget) {
             return false;
           }
@@ -1306,6 +1682,7 @@ Return only evidence supported by the inspected page.
 
   private buildDeterministicActionDescription(
     type:
+      | "X_CONNECT"
       | "X_FOLLOW"
       | "X_LIKE"
       | "X_REPOST"
@@ -1321,6 +1698,9 @@ Return only evidence supported by the inspected page.
 
   private humanizeXActionType(type: string): string {
     switch (type) {
+      case "X_CONNECT":
+        return "Connect akun X";
+
       case "X_FOLLOW":
         return "Follow akun X";
 
@@ -1524,26 +1904,23 @@ Return only evidence supported by the inspected page.
 
     const type = SUPPORTED_TASK_TYPES.has(rawType) ? rawType : "CUSTOM";
 
-    const targetUrl = this.normalizeGenericTargetUrl(
-      evidence.targetUrl,
-      sourceUrl,
-    );
+    const targetUrl =
+      type === "X_CONNECT"
+        ? this.normalizeXConnectTargetUrl(evidence.targetUrl, sourceUrl)
+        : this.normalizeGenericTargetUrl(evidence.targetUrl, sourceUrl);
 
     return [
       {
         type: type as TaskRequirement["type"],
         description,
         targetUrl,
-
         producesOwnTweetUrl:
           type === "X_POST" && evidence.producesOwnTweetUrl === true,
-
         requiresOwnTweetUrl:
           type !== "X_COMMENT" &&
           type !== "X_REPLY" &&
           type !== "X_QUOTE" &&
           evidence.requiresOwnTweetUrl === true,
-
         form: undefined,
       },
     ];
@@ -1555,6 +1932,20 @@ Return only evidence supported by the inspected page.
     sourceUrl: string,
   ): TaskRequirement {
     const normalizedType = type as TaskRequirement["type"];
+
+    if (normalizedType === "X_CONNECT") {
+      return {
+        type: normalizedType,
+        description: evidence.description.trim(),
+        targetUrl: this.normalizeXConnectTargetUrl(
+          evidence.targetUrl,
+          sourceUrl,
+        ),
+        producesOwnTweetUrl: false,
+        requiresOwnTweetUrl: false,
+        form: undefined,
+      };
+    }
 
     const targetUrl = this.normalizeXTargetUrl(
       normalizedType,
@@ -1568,17 +1959,12 @@ Return only evidence supported by the inspected page.
 
     return {
       type: normalizedType,
-
       description: evidence.description.trim(),
-
       targetUrl,
-
       producesOwnTweetUrl:
         normalizedType === "X_POST" && evidence.producesOwnTweetUrl === true,
-
       requiresOwnTweetUrl:
         !isCommentLike && evidence.requiresOwnTweetUrl === true,
-
       form: undefined,
     };
   }
@@ -1592,15 +1978,10 @@ Return only evidence supported by the inspected page.
     if (!form) {
       return {
         type: "FORM_SUBMIT",
-
         description: evidence.description.trim(),
-
         targetUrl: evidence.targetUrl?.trim() || sourceUrl,
-
         producesOwnTweetUrl: false,
-
         requiresOwnTweetUrl: false,
-
         form: undefined,
       };
     }
@@ -1614,11 +1995,8 @@ Return only evidence supported by the inspected page.
 
       return {
         type: type as any,
-
         label: field.label?.trim(),
-
         required: field.required ?? true,
-
         value: typeof field.value === "string" ? field.value.trim() : null,
       };
     });
@@ -1632,11 +2010,8 @@ Return only evidence supported by the inspected page.
 
       return {
         type: type as any,
-
         label: checkbox.label?.trim(),
-
         required: checkbox.required ?? false,
-
         checked: checkbox.checked ?? true,
       };
     });
@@ -1647,9 +2022,6 @@ Return only evidence supported by the inspected page.
       (field) => field.type === "WALLET_ADDRESS",
     );
 
-    /*
-     * WALLET_ADDRESS != wallet connection.
-     */
     const requiresWalletInteraction =
       walletInteraction === "CONNECT" ||
       walletInteraction === "SIGN" ||
@@ -1674,26 +2046,17 @@ Return only evidence supported by the inspected page.
 
     return {
       type: taskType,
-
       description: evidence.description.trim(),
-
       targetUrl,
-
       producesOwnTweetUrl: false,
-
       requiresOwnTweetUrl: fields.some(
         (field) => field.type === "OWN_TWEET_URL",
       ),
-
       form: {
         formType,
-
         targetUrl,
-
         fields,
-
         checkboxes,
-
         submit: undefined,
       },
     };
@@ -1701,6 +2064,35 @@ Return only evidence supported by the inspected page.
 
   private detectXActions(description: string, hintedType?: string): string[] {
     const lower = description.toLowerCase();
+
+    /*
+     * X_CONNECT is deliberately checked separately from
+     * social actions. It does not need "tweet/post/follow/etc."
+     * wording.
+     */
+
+    const connectPatterns = [
+      /\bconnect\s+(?:with|your|to)\s+x\b/,
+      /\bconnect\s+(?:with|your|to)\s+(?:an?\s+)?x\s+account\b/,
+      /\bconnect\s+(?:with|your|to)\s+(?:an?\s+)?twitter\s+account\b/,
+      /\bsign\s*[- ]?in\s+with\s+x\b/,
+      /\blog\s*[- ]?in\s+with\s+x\b/,
+      /\bcontinue\s+with\s+x\b/,
+      /\bauthori[sz]e\s+(?:with\s+)?x\b/,
+      /\bauthenticate\s+(?:with\s+)?x\b/,
+      /\bconnect\s+x\s+account\b/,
+    ];
+
+    const hinted = String(hintedType ?? "")
+      .trim()
+      .toUpperCase();
+
+    if (
+      hinted === "X_CONNECT" ||
+      connectPatterns.some((pattern) => pattern.test(lower))
+    ) {
+      return ["X_CONNECT"];
+    }
 
     const candidates: Array<{
       type: string;
@@ -1718,31 +2110,26 @@ Return only evidence supported by the inspected page.
         regex: /\bfollow\b/,
         priority: 1,
       },
-
       {
         type: "X_LIKE",
         regex: /\blike\b/,
         priority: 2,
       },
-
       {
         type: "X_REPOST",
         regex: /\b(retweet|repost|rt)\b/,
         priority: 3,
       },
-
       {
         type: "X_COMMENT",
         regex: /\bcomment\b/,
         priority: 4,
       },
-
       {
         type: "X_REPLY",
         regex: /\breply\b/,
         priority: 5,
       },
-
       {
         type: "X_QUOTE",
         regex: /\bquote\b/,
@@ -1756,9 +2143,7 @@ Return only evidence supported by the inspected page.
       if (match?.index !== undefined) {
         candidates.push({
           type: pattern.type,
-
           index: match.index,
-
           priority: pattern.priority,
         });
       }
@@ -1773,13 +2158,13 @@ Return only evidence supported by the inspected page.
         return a.priority - b.priority;
       });
 
-      const hinted = String(hintedType ?? "")
-        .trim()
-        .toUpperCase();
-
       const hintedIsX = X_TASK_TYPES.has(hinted);
 
-      if (hintedIsX || this.looksLikeSocialRequirement(lower)) {
+      if (hintedIsX && hinted !== "X_CONNECT") {
+        return candidates.map((candidate) => candidate.type);
+      }
+
+      if (this.looksLikeSocialRequirement(lower)) {
         return candidates.map((candidate) => candidate.type);
       }
     }
@@ -1826,13 +2211,6 @@ Return only evidence supported by the inspected page.
       return null;
     }
 
-    /*
-     * X_FOLLOW
-     *
-     * Bisa berupa:
-     * https://x.com/arcroulette
-     * https://x.com/intent/follow?screen_name=arcroulette
-     */
     if (type === "X_FOLLOW") {
       if (this.isXProfileUrl(parsed)) {
         return parsed.toString();
@@ -1848,13 +2226,6 @@ Return only evidence supported by the inspected page.
       return null;
     }
 
-    /*
-     * Post-level X actions.
-     *
-     * Prioritas:
-     * 1. Exact /status/ URL
-     * 2. Verified X intent URL
-     */
     if (
       type === "X_LIKE" ||
       type === "X_REPOST" ||
@@ -1866,9 +2237,6 @@ Return only evidence supported by the inspected page.
         return parsed.toString();
       }
 
-      /*
-       * Like
-       */
       if (
         parsed.pathname === "/intent/like" &&
         parsed.searchParams.has("tweet_id")
@@ -1876,9 +2244,6 @@ Return only evidence supported by the inspected page.
         return parsed.toString();
       }
 
-      /*
-       * Repost
-       */
       if (
         parsed.pathname === "/intent/retweet" &&
         parsed.searchParams.has("tweet_id")
@@ -1886,9 +2251,6 @@ Return only evidence supported by the inspected page.
         return parsed.toString();
       }
 
-      /*
-       * Reply
-       */
       if (
         parsed.pathname === "/intent/tweet" &&
         parsed.searchParams.has("in_reply_to")
@@ -1899,14 +2261,34 @@ Return only evidence supported by the inspected page.
       return null;
     }
 
-    /*
-     * X_POST
-     */
     if (type === "X_POST") {
       return parsed.toString();
     }
 
     return null;
+  }
+
+  private normalizeXConnectTargetUrl(
+    targetUrl: string | null | undefined,
+    sourceUrl: string,
+  ): string | null {
+    const raw = String(targetUrl ?? "").trim();
+
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      const parsed = new URL(raw);
+
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return null;
+      }
+
+      return parsed.toString();
+    } catch {
+      return sourceUrl;
+    }
   }
 
   private isXStatusUrl(url: URL): boolean {
@@ -1952,5 +2334,60 @@ Return only evidence supported by the inspected page.
     } catch {
       return sourceUrl;
     }
+  }
+
+  private isLikelyXAuthUrl(href: string, visibleText: string): boolean {
+    let parsed: URL;
+
+    try {
+      parsed = new URL(href);
+    } catch {
+      return false;
+    }
+
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+
+    const normalizedPath = parsed.pathname.toLowerCase();
+
+    const combined = `${visibleText} ${href}`.toLowerCase();
+
+    const hasAuthPath =
+      /\/(?:auth|oauth|login|signin|sign-in|connect|authorize)(?:\/|$)/i.test(
+        normalizedPath,
+      );
+
+    const hasXAuthPath =
+      /(?:auth|oauth|login|signin|sign-in|connect|authorize)[/_-]?(?:x|twitter)|(?:x|twitter)[/_-]?(?:auth|oauth|login|signin|sign-in|connect|authorize)/i.test(
+        combined,
+      );
+
+    const hasXText = /\b(?:x|twitter)\b/i.test(visibleText);
+
+    const hasConnectText =
+      /\b(?:connect|sign[\s-]?in|login|log[\s-]?in|continue|authorize|authenticate)\b/i.test(
+        combined,
+      );
+
+    return (hasAuthPath && hasXText && hasConnectText) || hasXAuthPath;
+  }
+
+  private findXAuthUrlFromText(text: string): string | null {
+    const matches = text.match(/https?:\/\/[^\s"'<>]+/gi) ?? [];
+
+    for (const candidate of matches) {
+      if (this.isLikelyXAuthUrl(candidate, candidate)) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  private textContainsAny(text: string, values: string[]): boolean {
+    const lower = text.toLowerCase();
+
+    return values.some((value) => lower.includes(value.toLowerCase()));
   }
 }

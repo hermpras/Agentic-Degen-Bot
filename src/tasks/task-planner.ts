@@ -2,6 +2,7 @@ import { AgentDatabase } from "../database/agent-database.js";
 
 export type PlannedTaskType =
   | "OPEN_PAGE"
+  | "X_CONNECT"
   | "X_FOLLOW"
   | "X_LIKE"
   | "X_REPOST"
@@ -634,6 +635,7 @@ export class TaskPlanner {
       case "OWN_TWEET_URL":
         /**
          * This value cannot be known during static planning.
+         *
          * It must come from an X_POST task when that capability is
          * explicitly required.
          */
@@ -738,6 +740,7 @@ export class TaskPlanner {
   private normalizeTaskType(value: unknown): PlannedTaskType | null {
     const allowed: PlannedTaskType[] = [
       "OPEN_PAGE",
+      "X_CONNECT",
       "X_FOLLOW",
       "X_LIKE",
       "X_REPOST",

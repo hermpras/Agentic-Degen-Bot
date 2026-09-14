@@ -40,17 +40,22 @@ export class Agent {
     chatId?: string | number,
   ): Promise<string> {
     const tools = this.toolRegistry.getAllTools();
-
     let messages: LLMMessage[] = [];
 
     if (this.memoryManager && chatId !== undefined) {
       this.memoryManager.saveMessage(chatId, "user", userMessage);
       messages = this.memoryManager.getRecentMessages(chatId, 20);
     } else {
-      messages = [{ role: "user", content: userMessage }];
+      messages = [
+        {
+          role: "user",
+          content: userMessage,
+        },
+      ];
     }
 
     const explicitlyRequestedPlanId = this.extractExplicitPlanId(userMessage);
+
     const executionIntent = this.hasExecutionIntent(userMessage);
 
     let freshCreatedPlanId: number | null = null;
@@ -69,7 +74,7 @@ export class Agent {
         /**
          * Execution workflow guard.
          *
-         * Kalau user meminta execution tanpa memberikan planId,
+         * Kalau user meminta execution tanpa planId,
          * Agent wajib membuat fresh task plan terlebih dahulu.
          *
          * Jangan menggunakan planId lama dari conversation memory.
@@ -91,11 +96,28 @@ export class Agent {
               ].join("\n")
             : "";
 
+        /**
+         * Pada turn pertama, request tertentu memang membutuhkan
+         * tool call.
+         *
+         * Contoh:
+         * "buatkan task plan Consensus"
+         * "buat account baru"
+         * "list account"
+         * "buat project"
+         *
+         * Untuk request seperti ini kita tidak boleh membiarkan
+         * model fallback menjawab seolah-olah tool sudah dijalankan.
+         */
+        const requiresToolCall =
+          iteration === 1 && this.requiresToolForRequest(userMessage, tools);
+
         const result = await this.provider.generate({
           messages,
           tools,
           systemInstruction:
             this.systemInstruction + executionWorkflowInstruction,
+          toolChoice: requiresToolCall ? "ANY" : "AUTO",
         });
 
         if (result.toolCalls && result.toolCalls.length > 0) {
@@ -218,7 +240,19 @@ export class Agent {
             );
 
             /**
-             * Capture fresh planId dari create_project_task_plan.
+             * Capture fresh planId dari
+             * create_project_task_plan.
+             *
+             * IMPORTANT:
+             * Tool create_project_task_plan tidak wajib
+             * mengembalikan field "status".
+             *
+             * Selama:
+             * - success === true
+             * - planId valid
+             *
+             * maka plan tersebut dianggap fresh plan
+             * yang baru dibuat pada turn ini.
              */
             if (call.name === "create_project_task_plan") {
               const createdPlanId = this.extractCreatedPlanId(toolResult);
@@ -228,6 +262,10 @@ export class Agent {
 
                 console.log(
                   `🆕 [Agent] Fresh task plan terdeteksi: #${freshCreatedPlanId}.`,
+                );
+              } else {
+                console.log(
+                  "⚠️ [Agent] create_project_task_plan berhasil dipanggil tetapi planId tidak berhasil dideteksi dari hasil tool.",
                 );
               }
             }
@@ -254,8 +292,6 @@ export class Agent {
              * DETERMINISTIC EXECUTION CONTINUATION
              * ============================================================
              *
-             * Ini inti fix untuk bug:
-             *
              * User:
              *   "langsung kerjakan Arc Ape"
              *
@@ -263,23 +299,13 @@ export class Agent {
              *   create_project_task_plan
              *
              * Tool:
-             *   { planId: 1, status: "PLANNED" }
+             *   { success: true, planId: 1 }
              *
-             * Sebelumnya Agent membiarkan LLM memutuskan apakah berhenti
-             * atau lanjut.
+             * Execution intent:
+             *   -> otomatis execute plan baru.
              *
-             * Sekarang:
-             *
-             *   execution intent
-             *       +
-             *   create plan sukses
-             *       +
-             *   fresh planId
-             *       ↓
-             *   AUTOMATIC execute_project_task_plan
-             *
-             * Approval boundary tetap aktif karena execution dilakukan
-             * melalui ToolRegistry.executeTool().
+             * Approval boundary tetap aktif karena execution
+             * dilakukan melalui ToolRegistry.executeTool().
              */
             if (
               call.name === "create_project_task_plan" &&
@@ -299,17 +325,6 @@ export class Agent {
                 planId: freshCreatedPlanId,
               };
 
-              /**
-               * Tetap lewat ToolRegistry agar:
-               *
-               * SAFE
-               *   → direct execution
-               *
-               * APPROVAL
-               *   → dibuat approval request
-               *
-               * Jadi Agent tidak pernah bypass approval system.
-               */
               const executionToolResult = await this.toolRegistry.executeTool(
                 "execute_project_task_plan",
                 executionArgs,
@@ -335,12 +350,6 @@ export class Agent {
                 ],
               });
 
-              /**
-               * Jangan langsung return.
-               *
-               * Biarkan LLM membaca hasil execution/approval request
-               * dan menghasilkan jawaban ke user.
-               */
               continue;
             }
           }
@@ -351,8 +360,8 @@ export class Agent {
         /**
          * Guard #3:
          *
-         * Execution intent tanpa explicit planId belum boleh menghasilkan
-         * final answer sebelum fresh plan dibuat.
+         * Execution intent tanpa explicit planId belum boleh
+         * menghasilkan final answer sebelum fresh task plan dibuat.
          */
         if (
           result.text &&
@@ -405,6 +414,80 @@ export class Agent {
     }
 
     return "⚠️ Agent mencapai batas maksimum iterasi tanpa menghasilkan jawaban.";
+  }
+
+  /**
+   * Menentukan apakah request user secara eksplisit meminta
+   * sebuah operasi yang harus dilakukan oleh tool.
+   *
+   * Kita sengaja TIDAK menggunakan ANY untuk semua pesan.
+   *
+   * Contoh yang wajib tool:
+   * - buatkan task plan
+   * - buat account
+   * - list account
+   * - buat project
+   * - update project
+   * - watchlist
+   *
+   * Pertanyaan biasa tetap menggunakan AUTO.
+   */
+  private requiresToolForRequest(message: string, tools: any[]): boolean {
+    if (!tools || tools.length === 0) {
+      return false;
+    }
+
+    const text = message.toLowerCase().trim();
+
+    const operationPatterns = [
+      /\bbuatkan\b/,
+      /\bbuat\b/,
+      /\bbikin\b/,
+      /\bcreate\b/,
+      /\btambahkan\b/,
+      /\btambah\b/,
+      /\badd\b/,
+      /\blist\b/,
+      /\bdaftar\b/,
+      /\blihat\b/,
+      /\bcek\b/,
+      /\bcheck\b/,
+      /\bupdate\b/,
+      /\bubah\b/,
+      /\bedit\b/,
+      /\brename\b/,
+      /\bganti nama\b/,
+      /\bhapus\b/,
+      /\bdelete\b/,
+      /\bwatchlist\b/,
+      /\btask\s*plan\b/,
+      /\btask\b.*\bplan\b/,
+      /\bproject\b.*\bplan\b/,
+    ];
+
+    const looksLikeOperation = operationPatterns.some((pattern) =>
+      pattern.test(text),
+    );
+
+    if (!looksLikeOperation) {
+      return false;
+    }
+
+    /**
+     * Pastikan memang ada tool yang relevan.
+     *
+     * Untuk request task plan, create_project_task_plan
+     * harus tersedia.
+     */
+    if (
+      /\btask\s*plan\b/.test(text) ||
+      /\btask\b.*\bplan\b/.test(text) ||
+      /\bproject\b.*\bplan\b/.test(text)
+    ) {
+      return tools.some((tool) => tool.name === "create_project_task_plan");
+    }
+
+    return true;
   }
 
   private hasExecutionIntent(message: string): boolean {
@@ -480,15 +563,25 @@ export class Agent {
       const parsed = JSON.parse(toolResult) as {
         success?: boolean;
         planId?: number;
-        status?: string;
       };
 
+      /**
+       * create_project_task_plan saat ini mengembalikan:
+       *
+       * {
+       *   success: true,
+       *   planId: 24,
+       *   ...
+       * }
+       *
+       * Tidak ada requirement bahwa response harus
+       * mempunyai field "status".
+       */
       if (
         parsed.success === true &&
         typeof parsed.planId === "number" &&
         Number.isInteger(parsed.planId) &&
-        parsed.planId > 0 &&
-        parsed.status === "PLANNED"
+        parsed.planId > 0
       ) {
         return parsed.planId;
       }

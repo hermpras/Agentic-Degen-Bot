@@ -5,6 +5,7 @@ import type { Tool } from "../tool.interface.js";
 
 interface ExecuteProjectTaskPlanArgs {
   planId: number;
+  accountId?: number;
 }
 
 export function executeProjectTaskPlanTool(database: AgentDatabase): Tool {
@@ -14,7 +15,7 @@ export function executeProjectTaskPlanTool(database: AgentDatabase): Tool {
     name: "execute_project_task_plan",
 
     description:
-      "Mengeksekusi task plan yang SUDAH dibuat dan disimpan sebelumnya berdasarkan planId. Tool ini TIDAK membuat atau mengubah task plan. Gunakan hanya setelah user secara eksplisit meminta execution. Tool ini memiliki approval boundary.",
+      "Mengeksekusi task plan yang SUDAH dibuat dan disimpan sebelumnya berdasarkan planId. Tool ini TIDAK membuat atau mengubah task plan. Gunakan hanya setelah user secara eksplisit meminta execution. accountId bersifat optional untuk membatasi execution ke satu account tertentu tanpa mengubah isi task plan. Tool ini memiliki approval boundary.",
 
     riskLevel: "APPROVAL",
 
@@ -26,6 +27,12 @@ export function executeProjectTaskPlanTool(database: AgentDatabase): Tool {
           type: "number",
           description:
             "ID plan yang sudah dibuat oleh create_project_task_plan dan ingin dieksekusi.",
+        },
+
+        accountId: {
+          type: "number",
+          description:
+            "Optional. Jika diisi, hanya task milik account tersebut yang akan dieksekusi. Task plan asli tidak diubah.",
         },
       },
 
@@ -43,6 +50,18 @@ export function executeProjectTaskPlanTool(database: AgentDatabase): Tool {
         input.planId <= 0
       ) {
         throw new Error("planId wajib berupa angka integer positif.");
+      }
+
+      if (
+        input.accountId !== undefined &&
+        input.accountId !== null &&
+        (typeof input.accountId !== "number" ||
+          !Number.isInteger(input.accountId) ||
+          input.accountId <= 0)
+      ) {
+        throw new Error(
+          "accountId jika diisi wajib berupa angka integer positif.",
+        );
       }
 
       const storedPlan = database.getTaskPlan(input.planId);
@@ -71,14 +90,19 @@ export function executeProjectTaskPlanTool(database: AgentDatabase): Tool {
 
       validateStoredPlan(plan, storedPlan);
 
+      const executionScope =
+        input.accountId !== undefined
+          ? `account #${input.accountId}`
+          : "semua account";
+
       console.log(
-        `🚀 [execute_project_task_plan] Mengeksekusi plan #${input.planId} untuk project "${plan.projectName}".`,
+        `🚀 [execute_project_task_plan] Mengeksekusi plan #${input.planId} untuk project "${plan.projectName}" → ${executionScope}.`,
       );
 
       database.updateTaskPlanStatus(input.planId, "EXECUTING");
 
       try {
-        const report = await workflow.executePlan(plan);
+        const report = await workflow.executePlan(plan, input.accountId);
 
         const finalStatus = report.failedTasks > 0 ? "FAILED" : "COMPLETED";
 
@@ -87,24 +111,42 @@ export function executeProjectTaskPlanTool(database: AgentDatabase): Tool {
         return {
           success: report.failedTasks === 0,
           executionStarted: true,
+
           planId: input.planId,
+
           status: finalStatus,
+
+          executionScope: {
+            accountId: input.accountId ?? null,
+            mode:
+              input.accountId !== undefined ? "SINGLE_ACCOUNT" : "ALL_ACCOUNTS",
+          },
 
           message:
             report.failedTasks === 0
-              ? `Task plan #${input.planId} berhasil dieksekusi.`
+              ? `Task plan #${input.planId} berhasil dieksekusi${
+                  input.accountId !== undefined
+                    ? ` untuk account #${input.accountId}`
+                    : ""
+                }.`
               : `Task plan #${input.planId} selesai dengan ${report.failedTasks} task gagal.`,
 
           projectName: plan.projectName,
           sourceUrl: plan.sourceUrl,
-          accountCount: plan.accountCount,
-          taskCount: plan.taskCount,
+
+          accountCount: input.accountId !== undefined ? 1 : plan.accountCount,
+
+          taskCount: report.totalTasks,
 
           report: {
             totalTasks: report.totalTasks,
+
             completedTasks: report.completedTasks,
+
             failedTasks: report.failedTasks,
+
             skippedTasks: report.skippedTasks,
+
             results: report.results,
           },
         };
@@ -172,7 +214,7 @@ function validateStoredPlan(
 
   if (plan.sourceUrl !== storedPlan.sourceUrl) {
     throw new Error(
-      `Snapshot task plan tidak konsisten dengan database: sourceUrl berbeda.`,
+      "Snapshot task plan tidak konsisten dengan database: sourceUrl berbeda.",
     );
   }
 }
