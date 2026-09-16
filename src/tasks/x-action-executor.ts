@@ -4,10 +4,15 @@ import type { PlannedTask } from "./task-planner.js";
 
 export interface XBrowser {
   open(url: string): Promise<void>;
+
   elementExists(selector: string): Promise<boolean>;
+
   click(selector: string): Promise<void>;
+
   getText(selector: string): Promise<string>;
+
   getCurrentUrl(): Promise<string>;
+
   getPageResult(): Promise<{
     url: string;
     title: string;
@@ -16,6 +21,8 @@ export interface XBrowser {
 }
 
 export type XFollowState = "FOLLOW" | "FOLLOWING" | "UNKNOWN";
+
+export type XLikeState = "LIKE" | "LIKED" | "UNKNOWN";
 
 export interface XActionResult {
   success: boolean;
@@ -51,22 +58,260 @@ export class XActionExecutor {
     }
   }
 
+  async inspectLike(accountId: number, targetUrl: string): Promise<XLikeState> {
+    const browser = await this.accountBrowser.openForAccount(accountId);
+
+    try {
+      await browser.open(targetUrl);
+      await this.waitForXPost(browser);
+
+      return await this.detectLikeState(browser);
+    } finally {
+      await this.accountBrowser.close();
+    }
+  }
+
   async execute(task: PlannedTask): Promise<XActionResult> {
     console.log(
       `𝕏 [XActionExecutor] Preparing ${task.taskType} → Account ${task.accountId}`,
     );
 
-    if (task.taskType !== "X_FOLLOW") {
-      throw new Error(`X action ${task.taskType} belum diimplementasikan.`);
+    if (task.taskType === "X_FOLLOW") {
+      if (!task.targetUrl) {
+        throw new Error(
+          `X_FOLLOW membutuhkan targetUrl untuk account ${task.accountId}.`,
+        );
+      }
+
+      return this.executeFollowWithInspection(task.accountId, task.targetUrl);
     }
 
-    if (!task.targetUrl) {
-      throw new Error(
-        `X_FOLLOW membutuhkan targetUrl untuk account ${task.accountId}.`,
-      );
+    if (task.taskType === "X_LIKE") {
+      if (!task.targetUrl) {
+        throw new Error(
+          `X_LIKE membutuhkan targetUrl post X untuk account ${task.accountId}.`,
+        );
+      }
+
+      return this.executeLikeWithInspection(task.accountId, task.targetUrl);
     }
 
-    return this.executeFollowWithInspection(task.accountId, task.targetUrl);
+    throw new Error(`X action ${task.taskType} belum diimplementasikan.`);
+  }
+
+  private async executeLikeWithInspection(
+    accountId: number,
+    targetUrl: string,
+  ): Promise<XActionResult> {
+    const browser = await this.accountBrowser.openForAccount(accountId);
+
+    try {
+      console.log(`𝕏 [XActionExecutor] X_LIKE → Account ${accountId}`);
+
+      console.log(`𝕏 [XActionExecutor] Target post → ${targetUrl}`);
+
+      await browser.open(targetUrl);
+
+      console.log("𝕏 [XActionExecutor] Waiting for X post to render...");
+
+      await this.waitForXPost(browser);
+
+      const state = await this.detectLikeState(browser);
+
+      console.log(`𝕏 [XActionExecutor] Like state: ${state}`);
+
+      /*
+       * Kalau account ternyata sudah Like,
+       * jangan klik lagi karena klik kedua bisa melakukan Unlike.
+       */
+      if (state === "LIKED") {
+        const output = `Already liked ${targetUrl}`;
+
+        return {
+          success: true,
+          action: "X_LIKE",
+          accountId,
+          targetUrl,
+          message: "Account sudah me-like post.",
+          output,
+          proof: output,
+        };
+      }
+
+      if (state === "UNKNOWN") {
+        throw new Error(
+          `Like state tidak dapat ditentukan pada ${targetUrl}. Action dibatalkan.`,
+        );
+      }
+
+      /*
+       * X menggunakan beberapa bentuk DOM untuk tombol Like.
+       * Prioritas diberikan ke data-testid.
+       */
+      const likeSelector = await this.findLikeButton(browser);
+
+      if (!likeSelector) {
+        throw new Error(`Tombol Like untuk post ${targetUrl} tidak ditemukan.`);
+      }
+
+      console.log(`𝕏 [XActionExecutor] Like selector → ${likeSelector}`);
+
+      console.log("𝕏 [XActionExecutor] Clicking Like...");
+
+      await browser.click(likeSelector);
+
+      await this.waitForLikedState(browser);
+
+      const finalState = await this.detectLikeState(browser);
+
+      console.log(`𝕏 [XActionExecutor] Final like state: ${finalState}`);
+
+      if (finalState !== "LIKED") {
+        throw new Error(
+          `Like click dilakukan tetapi status akhir tidak terkonfirmasi. State: ${finalState}`,
+        );
+      }
+
+      const output = `Liked ${targetUrl}`;
+
+      return {
+        success: true,
+        action: "X_LIKE",
+        accountId,
+        targetUrl,
+        message: "Berhasil like post.",
+        output,
+        proof: output,
+      };
+    } finally {
+      await this.accountBrowser.close();
+    }
+  }
+
+  private async detectLikeState(browser: BrowserExecutor): Promise<XLikeState> {
+    /*
+     * State utama berdasarkan aria-pressed.
+     *
+     * X biasanya memakai:
+     *
+     * data-testid="like"
+     * aria-label="Like"
+     *
+     * dan setelah liked:
+     *
+     * data-testid="unlike"
+     * aria-label="Unlike"
+     *
+     * Kita cek beberapa selector agar tidak bergantung
+     * pada satu atribut saja.
+     */
+
+    const likedSelectors = [
+      'button[data-testid="unlike"]',
+      'button[aria-label="Unlike" i]',
+      '[data-testid="unlike"]',
+      '[aria-label="Unlike" i]',
+      'button[aria-pressed="true"][data-testid*="like" i]',
+    ];
+
+    for (const selector of likedSelectors) {
+      try {
+        if (await browser.elementExists(selector)) {
+          return "LIKED";
+        }
+      } catch {
+        // Coba selector berikutnya.
+      }
+    }
+
+    const likeSelectors = [
+      'button[data-testid="like"]',
+      'button[aria-label="Like" i]',
+      '[data-testid="like"]',
+      '[aria-label="Like" i]',
+      'button[aria-pressed="false"][data-testid*="like" i]',
+    ];
+
+    for (const selector of likeSelectors) {
+      try {
+        if (await browser.elementExists(selector)) {
+          return "LIKE";
+        }
+      } catch {
+        // Coba selector berikutnya.
+      }
+    }
+
+    return "UNKNOWN";
+  }
+
+  private async findLikeButton(
+    browser: BrowserExecutor,
+  ): Promise<string | null> {
+    const selectors = [
+      'button[data-testid="like"]',
+      'button[aria-label="Like" i]',
+      '[data-testid="like"]',
+      '[aria-label="Like" i]',
+    ];
+
+    for (const selector of selectors) {
+      try {
+        if (await browser.elementExists(selector)) {
+          return selector;
+        }
+      } catch {
+        // Coba selector berikutnya.
+      }
+    }
+
+    return null;
+  }
+
+  private async waitForLikedState(
+    browser: BrowserExecutor,
+    timeoutMs = 10000,
+  ): Promise<void> {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const state = await this.detectLikeState(browser);
+
+      if (state === "LIKED") {
+        console.log("𝕏 [XActionExecutor] Like berhasil terkonfirmasi.");
+
+        return;
+      }
+
+      await this.sleep(500);
+    }
+  }
+
+  private async waitForXPost(
+    browser: BrowserExecutor,
+    timeoutMs = 15000,
+  ): Promise<void> {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      try {
+        const state = await this.detectLikeState(browser);
+
+        if (state !== "UNKNOWN") {
+          console.log("𝕏 [XActionExecutor] X post ready.");
+
+          return;
+        }
+      } catch {
+        // X masih loading.
+      }
+
+      await this.sleep(500);
+    }
+
+    throw new Error(
+      `X post tidak selesai render dalam ${timeoutMs}ms: ${await browser.getCurrentUrl()}`,
+    );
   }
 
   private async executeFollowWithInspection(
@@ -114,18 +359,6 @@ export class XActionExecutor {
         );
       }
 
-      /*
-       * X sekarang menggunakan casing username yang bisa berbeda
-       * dari URL. Contoh:
-       *
-       * URL:
-       *   /arcwargg
-       *
-       * DOM:
-       *   Follow @Arcwargg
-       *
-       * Modifier "i" membuat attribute selector case-insensitive.
-       */
       const followSelector = `button[aria-label="Follow @${handle}" i]`;
 
       console.log(`𝕏 [XActionExecutor] Target handle: @${handle}`);
@@ -181,10 +414,6 @@ export class XActionExecutor {
     const handle = this.extractXHandle(targetUrl);
 
     if (handle) {
-      /*
-       * Case-insensitive karena casing username pada DOM
-       * bisa berbeda dari casing URL.
-       */
       const followingSelector = `button[aria-label="Following @${handle}" i]`;
 
       const followSelector = `button[aria-label="Follow @${handle}" i]`;
@@ -198,12 +427,8 @@ export class XActionExecutor {
       }
     }
 
-    /*
-     * Fallback hanya untuk status.
-     * Jangan gunakan page text untuk menentukan tombol
-     * yang akan diklik karena X punya banyak tombol Follow.
-     */
     const page = await browser.getPageResult();
+
     const normalizedText = page.text.toLowerCase();
 
     if (
@@ -229,10 +454,12 @@ export class XActionExecutor {
     while (Date.now() - startedAt < timeoutMs) {
       try {
         const page = await browser.getPageResult();
+
         const text = page.text.toLowerCase();
 
         if (text.includes("follow") || text.includes("following")) {
           console.log("𝕏 [XActionExecutor] X page ready.");
+
           return;
         }
       } catch {
@@ -259,6 +486,7 @@ export class XActionExecutor {
 
       if (state === "FOLLOWING") {
         console.log("𝕏 [XActionExecutor] Follow berhasil terkonfirmasi.");
+
         return;
       }
 

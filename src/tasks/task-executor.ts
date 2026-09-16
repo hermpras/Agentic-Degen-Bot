@@ -20,7 +20,7 @@ import {
 
 import { GeminiProvider } from "../providers/gemini.provider.js";
 
-import type { PlannedTask } from "./task-planner.js";
+import type { PlannedTask, TaskPlan } from "./task-planner.js";
 
 export interface TaskExecutionResult {
   planTaskId: string;
@@ -95,23 +95,27 @@ export class TaskExecutor {
       adaptiveWebExecutor ?? this.createDefaultAdaptiveWebExecutor();
   }
 
-  async executePlan(tasks: PlannedTask[]): Promise<TaskExecutionReport> {
+  async executePlan(plan: TaskPlan): Promise<TaskExecutionReport> {
+    const tasks = plan.tasks;
+
     const report: TaskExecutionReport = {
       totalTasks: tasks.length,
-
       completedTasks: 0,
-
       failedTasks: 0,
-
       skippedTasks: 0,
-
       results: [],
     };
 
     const completedPlanTaskIds = new Set<string>();
 
+    console.log("");
+    console.log(`🚀 [TaskExecutor] Starting plan → ${plan.projectName}`);
+    console.log(`🔗 [TaskExecutor] Plan sourceUrl → ${plan.sourceUrl}`);
+    console.log(`👥 [TaskExecutor] Accounts → ${plan.accountCount}`);
+    console.log(`📋 [TaskExecutor] Tasks → ${tasks.length}`);
+
     for (const task of tasks) {
-      const result = await this.executeTask(task, completedPlanTaskIds);
+      const result = await this.executeTask(task, completedPlanTaskIds, plan);
 
       report.results.push(result);
 
@@ -126,12 +130,18 @@ export class TaskExecutor {
       }
     }
 
+    console.log("");
+    console.log(
+      `📊 [TaskExecutor] Plan selesai → completed=${report.completedTasks}, failed=${report.failedTasks}, skipped=${report.skippedTasks}`,
+    );
+
     return report;
   }
 
   async executeTask(
     task: PlannedTask,
     completedPlanTaskIds = new Set<string>(),
+    plan?: TaskPlan,
   ): Promise<TaskExecutionResult> {
     console.log("");
 
@@ -146,19 +156,12 @@ export class TaskExecutor {
 
       return {
         planTaskId: task.planTaskId,
-
         taskId: null,
-
         projectName: task.projectName,
-
         accountName: task.accountName,
-
         taskType: task.taskType,
-
         status: "PENDING",
-
         output: null,
-
         error: dependencyResult.reason ?? "Dependency belum selesai.",
       };
     }
@@ -170,7 +173,11 @@ export class TaskExecutor {
 
       this.taskManager.markTaskInProgress(databaseTaskId);
 
-      const actionResult = await this.executeTaskAction(task, databaseTaskId);
+      const actionResult = await this.executeTaskAction(
+        task,
+        databaseTaskId,
+        plan,
+      );
 
       if (actionResult.status === "IN_PROGRESS") {
         console.log(
@@ -179,19 +186,12 @@ export class TaskExecutor {
 
         return {
           planTaskId: task.planTaskId,
-
           taskId: databaseTaskId,
-
           projectName: task.projectName,
-
           accountName: task.accountName,
-
           taskType: task.taskType,
-
           status: "IN_PROGRESS",
-
           output: actionResult.output,
-
           error: null,
         };
       }
@@ -208,19 +208,12 @@ export class TaskExecutor {
 
         return {
           planTaskId: task.planTaskId,
-
           taskId: databaseTaskId,
-
           projectName: task.projectName,
-
           accountName: task.accountName,
-
           taskType: task.taskType,
-
           status: "FAILED",
-
           output: actionResult.output,
-
           error: errorMessage,
         };
       }
@@ -234,19 +227,12 @@ export class TaskExecutor {
 
       return {
         planTaskId: task.planTaskId,
-
         taskId: databaseTaskId,
-
         projectName: task.projectName,
-
         accountName: task.accountName,
-
         taskType: task.taskType,
-
         status: "DONE",
-
         output: actionResult.output,
-
         error: null,
       };
     } catch (error) {
@@ -262,19 +248,12 @@ export class TaskExecutor {
 
       return {
         planTaskId: task.planTaskId,
-
         taskId: databaseTaskId,
-
         projectName: task.projectName,
-
         accountName: task.accountName,
-
         taskType: task.taskType,
-
         status: "FAILED",
-
         output: null,
-
         error: message,
       };
     }
@@ -283,9 +262,10 @@ export class TaskExecutor {
   private async executeTaskAction(
     task: PlannedTask,
     databaseTaskId: number,
+    plan?: TaskPlan,
   ): Promise<TaskActionResult> {
     if (this.isXAction(task.taskType)) {
-      return this.executeXAction(task);
+      return this.executeXAction(task, databaseTaskId, plan);
     }
 
     switch (task.taskType) {
@@ -325,13 +305,6 @@ export class TaskExecutor {
    *
    * X_CONNECT_CDP_URL_ACCOUNT_<ACCOUNT_ID>
    * X_STORAGE_STATE_PATH_ACCOUNT_<ACCOUNT_ID>
-   *
-   * Contoh:
-   *
-   * X_CONNECT_CDP_URL_ACCOUNT_1=http://127.0.0.1:9222
-   * X_CONNECT_CDP_URL_ACCOUNT_2=http://127.0.0.1:9224
-   *
-   * Tidak ada fallback ke X_CONNECT_CDP_URL global.
    *
    * Setelah OAuth selesai, identity X di browser diverifikasi
    * terhadap twitterHandle milik account.
@@ -381,9 +354,9 @@ export class TaskExecutor {
 
     const accountStorageEnvKey = `X_STORAGE_STATE_PATH_ACCOUNT_${accountId}`;
 
-    const cdpUrl = process.env[accountCdpEnvKey]?.trim() || null;
+    const cdpUrl = process.env[accountCdpEnvKey]?.trim() ?? null;
 
-    const storageStatePath = process.env[accountStorageEnvKey]?.trim() || null;
+    const storageStatePath = process.env[accountStorageEnvKey]?.trim() ?? null;
 
     console.log(`🔐 [TaskExecutor] X session env → ${accountCdpEnvKey}`);
 
@@ -403,33 +376,22 @@ export class TaskExecutor {
      * ============================================================
      *
      * Jangan pernah fallback ke global X_CONNECT_CDP_URL.
-     *
-     * Kalau account belum punya browser session,
-     * task berhenti di sini.
      */
 
     if (!cdpUrl && !storageStatePath) {
       const output = JSON.stringify(
         {
           action: "X_CONNECT",
-
           status: "BLOCKED",
-
           accountId,
-
           accountName: task.accountName,
-
           expectedTwitterHandle,
-
           targetUrl: task.targetUrl,
-
           reason: "ACCOUNT_X_SESSION_NOT_CONFIGURED",
-
           requiredEnvironmentVariables: [
             accountCdpEnvKey,
             accountStorageEnvKey,
           ],
-
           message:
             `Browser session X untuk account #${accountId} belum dikonfigurasi. ` +
             `Task sengaja tidak menggunakan X_CONNECT_CDP_URL global ` +
@@ -447,18 +409,14 @@ export class TaskExecutor {
 
       return {
         output,
-
         status: "IN_PROGRESS",
       };
     }
 
     const browser = new BrowserExecutor({
       headless: cdpUrl ? false : true,
-
       timeoutMs: 30000,
-
       connectOverCDPUrl: cdpUrl ?? undefined,
-
       storageStatePath:
         !cdpUrl && storageStatePath ? storageStatePath : undefined,
     });
@@ -527,14 +485,6 @@ export class TaskExecutor {
         clicked = true;
       }
 
-      /*
-       * browser.open() dapat langsung mengikuti redirect:
-       *
-       * /auth/x/start
-       *      ↓
-       * x.com/i/oauth2/authorize
-       */
-
       const isXOAuthUrl =
         /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/i\/oauth2\/authorize/i.test(
           initialUrl,
@@ -566,19 +516,12 @@ export class TaskExecutor {
         const output = JSON.stringify(
           {
             action: "X_CONNECT",
-
             status: "BLOCKED",
-
             accountId,
-
             accountName: task.accountName,
-
             expectedTwitterHandle,
-
             targetUrl: task.targetUrl,
-
             currentUrl,
-
             message:
               "Halaman tidak menampilkan tombol/link Connect with X, tidak berada pada OAuth start endpoint, dan bukan halaman OAuth authorization X.",
           },
@@ -590,7 +533,6 @@ export class TaskExecutor {
 
         return {
           output,
-
           status: "IN_PROGRESS",
         };
       }
@@ -618,10 +560,6 @@ export class TaskExecutor {
           try {
             const candidateUrl = candidatePage.url();
 
-            /*
-             * Callback URL adalah completion signal paling kuat.
-             */
-
             const isProjectCallback = /\/auth\/x\/callback(?:[/?#]|$)/i.test(
               candidateUrl,
             );
@@ -642,14 +580,6 @@ export class TaskExecutor {
                 .replace(/\s+/g, " ")
                 .trim();
 
-              /*
-               * OAuth callback berhasil.
-               *
-               * Jangan langsung DONE.
-               *
-               * Kita lanjutkan ke identity verification.
-               */
-
               console.log(
                 `✅ [TaskExecutor] X_CONNECT OAuth callback terdeteksi.`,
               );
@@ -666,31 +596,18 @@ export class TaskExecutor {
               const output = JSON.stringify(
                 {
                   action: "X_CONNECT",
-
                   status: identity.verified ? "CONNECTED" : "IDENTITY_MISMATCH",
-
                   accountId,
-
                   accountName: task.accountName,
-
                   expectedTwitterHandle: identity.expectedHandle,
-
                   detectedTwitterHandle: identity.detectedHandle,
-
                   identityVerified: identity.verified,
-
                   identitySource: identity.source,
-
                   targetUrl: task.targetUrl,
-
                   callbackUrl: candidateUrl,
-
                   title,
-
                   message: identity.message,
-
                   callbackDetected: true,
-
                   callbackBodyPreview: bodyText.slice(0, 1000),
                 },
                 null,
@@ -708,7 +625,6 @@ export class TaskExecutor {
 
                 return {
                   output,
-
                   status: "FAILED",
                 };
               }
@@ -721,17 +637,9 @@ export class TaskExecutor {
 
               return {
                 output,
-
                 status: "DONE",
               };
             }
-
-            /*
-             * Fallback:
-             *
-             * OAuth selesai dan project langsung redirect
-             * ke root/halaman project.
-             */
 
             let targetOrigin: string | null = null;
 
@@ -751,113 +659,83 @@ export class TaskExecutor {
               currentOrigin === targetOrigin &&
               !/\/auth\/x\/start/i.test(candidateUrl);
 
-            if (returnedToProject) {
-              if (clicked || isXOAuthUrl) {
-                page = candidatePage;
+            if (returnedToProject && (clicked || isXOAuthUrl)) {
+              page = candidatePage;
 
-                browser.usePage(candidatePage);
+              browser.usePage(candidatePage);
 
-                const title = await page.title().catch(() => "");
+              const title = await page.title().catch(() => "");
 
-                const bodyText = (
-                  await page
-                    .locator("body")
-                    .innerText()
-                    .catch(() => "")
-                )
-                  .replace(/\s+/g, " ")
-                  .trim();
+              const bodyText = (
+                await page
+                  .locator("body")
+                  .innerText()
+                  .catch(() => "")
+              )
+                .replace(/\s+/g, " ")
+                .trim();
 
-                /*
-                 * Project sudah kembali.
-                 *
-                 * Tetap wajib verify identity X.
-                 */
+              console.log(
+                `🔎 [TaskExecutor] Project kembali. Memverifikasi identity X account #${accountId}...`,
+              );
 
-                console.log(
-                  `🔎 [TaskExecutor] Project kembali. Memverifikasi identity X account #${accountId}...`,
+              const identity = await this.verifyXIdentity(
+                page,
+                expectedTwitterHandle,
+              );
+
+              const output = JSON.stringify(
+                {
+                  action: "X_CONNECT",
+                  status: identity.verified ? "CONNECTED" : "IDENTITY_MISMATCH",
+                  accountId,
+                  accountName: task.accountName,
+                  expectedTwitterHandle: identity.expectedHandle,
+                  detectedTwitterHandle: identity.detectedHandle,
+                  identityVerified: identity.verified,
+                  identitySource: identity.source,
+                  targetUrl: task.targetUrl,
+                  currentUrl: candidateUrl,
+                  title,
+                  message: identity.message,
+                  callbackDetected: false,
+                  projectOriginDetected: true,
+                  bodyPreview: bodyText.slice(0, 1000),
+                },
+                null,
+                2,
+              );
+
+              this.taskManager.saveTaskProof(databaseTaskId, output);
+
+              if (!identity.verified) {
+                console.error(
+                  `❌ [TaskExecutor] X identity verification FAILED untuk account #${accountId}.`,
                 );
 
-                const identity = await this.verifyXIdentity(
-                  page,
-                  expectedTwitterHandle,
-                );
-
-                const output = JSON.stringify(
-                  {
-                    action: "X_CONNECT",
-
-                    status: identity.verified
-                      ? "CONNECTED"
-                      : "IDENTITY_MISMATCH",
-
-                    accountId,
-
-                    accountName: task.accountName,
-
-                    expectedTwitterHandle: identity.expectedHandle,
-
-                    detectedTwitterHandle: identity.detectedHandle,
-
-                    identityVerified: identity.verified,
-
-                    identitySource: identity.source,
-
-                    targetUrl: task.targetUrl,
-
-                    currentUrl: candidateUrl,
-
-                    title,
-
-                    message: identity.message,
-
-                    callbackDetected: false,
-
-                    projectOriginDetected: true,
-
-                    bodyPreview: bodyText.slice(0, 1000),
-                  },
-                  null,
-                  2,
-                );
-
-                this.taskManager.saveTaskProof(databaseTaskId, output);
-
-                if (!identity.verified) {
-                  console.error(
-                    `❌ [TaskExecutor] X identity verification FAILED untuk account #${accountId}.`,
-                  );
-
-                  console.error(identity.message);
-
-                  return {
-                    output,
-
-                    status: "FAILED",
-                  };
-                }
-
-                console.log(
-                  `✅ [TaskExecutor] X_CONNECT kembali ke domain project.`,
-                );
-
-                console.log(
-                  `👤 [TaskExecutor] Verified X account → #${accountId} / ${identity.detectedHandle}`,
-                );
-
-                console.log(`🔗 [TaskExecutor] Project URL: ${candidateUrl}`);
+                console.error(identity.message);
 
                 return {
                   output,
-
-                  status: "DONE",
+                  status: "FAILED",
                 };
               }
-            }
 
-            /*
-             * Log perubahan URL.
-             */
+              console.log(
+                `✅ [TaskExecutor] X_CONNECT kembali ke domain project.`,
+              );
+
+              console.log(
+                `👤 [TaskExecutor] Verified X account → #${accountId} / ${identity.detectedHandle}`,
+              );
+
+              console.log(`🔗 [TaskExecutor] Project URL: ${candidateUrl}`);
+
+              return {
+                output,
+                status: "DONE",
+              };
+            }
 
             if (candidateUrl !== lastUrl) {
               console.log(
@@ -910,26 +788,16 @@ export class TaskExecutor {
       const output = JSON.stringify(
         {
           action: "X_CONNECT",
-
           status: "IN_PROGRESS",
-
           accountId,
-
           accountName: task.accountName,
-
           expectedTwitterHandle,
-
           targetUrl: task.targetUrl,
-
           currentUrl,
-
           title,
-
           message:
             "OAuth belum selesai dalam waktu tunggu. Selesaikan authorization secara manual pada browser session account ini lalu jalankan task X_CONNECT kembali.",
-
           callbackDetected: false,
-
           timeoutMs: maxWaitMs,
         },
         null,
@@ -942,14 +810,9 @@ export class TaskExecutor {
 
       return {
         output,
-
         status: "IN_PROGRESS",
       };
     } finally {
-      /*
-       * Jangan close browser CDP external milik user.
-       */
-
       if (cdpUrl) {
         console.log(
           `🌐 [TaskExecutor] X_CONNECT menggunakan external CDP browser account #${accountId}; browser tidak ditutup.`,
@@ -963,17 +826,6 @@ export class TaskExecutor {
   /**
    * Verify bahwa browser X yang digunakan memang login
    * sebagai account yang diharapkan.
-   *
-   * Strategi:
-   *
-   * 1. Cari profile link resmi dari X AppTabBar.
-   * 2. Cari link profile yang cocok dari halaman X.
-   * 3. Kalau expected handle ditemukan → MATCH.
-   * 4. Kalau profile handle lain dapat dideteksi → MISMATCH.
-   * 5. Kalau tidak bisa mendeteksi identity dengan cukup yakin
-   *    → FAIL CLOSED.
-   *
-   * Kita tidak boleh menebak identity.
    */
   private async verifyXIdentity(
     page: import("playwright").Page,
@@ -984,27 +836,15 @@ export class TaskExecutor {
     if (!normalizedExpected) {
       return {
         verified: false,
-
         expectedHandle,
-
         detectedHandle: null,
-
         source: null,
-
         message:
           "Expected Twitter/X handle kosong. Identity verification dihentikan.",
       };
     }
 
     console.log(`🔎 [XIdentity] Expected identity → @${normalizedExpected}`);
-
-    /*
-     * Setelah OAuth callback, project bisa berada di halaman
-     * project. Untuk verification yang lebih reliable,
-     * kita buka X home pada browser session yang SAMA.
-     *
-     * Ini tidak membuat session baru.
-     */
 
     try {
       await page.goto("https://x.com/home", {
@@ -1020,13 +860,6 @@ export class TaskExecutor {
         }`,
       );
     }
-
-    /*
-     * ============================================================
-     * STRATEGY 1
-     * AppTabBar Profile Link
-     * ============================================================
-     */
 
     try {
       const profileLink = page.locator(
@@ -1044,26 +877,18 @@ export class TaskExecutor {
           if (detected === normalizedExpected) {
             return {
               verified: true,
-
               expectedHandle,
-
               detectedHandle: `@${detected}`,
-
               source: "AppTabBar_Profile_Link",
-
               message: `Identity X terverifikasi. Browser session account ini login sebagai @${detected}.`,
             };
           }
 
           return {
             verified: false,
-
             expectedHandle,
-
             detectedHandle: `@${detected}`,
-
             source: "AppTabBar_Profile_Link",
-
             message: `Identity mismatch. Account "${expectedHandle}" mengharapkan @${normalizedExpected}, tetapi browser session terdeteksi sebagai @${detected}.`,
           };
         }
@@ -1076,13 +901,6 @@ export class TaskExecutor {
       );
     }
 
-    /*
-     * ============================================================
-     * STRATEGY 2
-     * Cari link profile yang href-nya satu segment.
-     * ============================================================
-     */
-
     try {
       const profileCandidates = await page
         .locator("a[href]")
@@ -1091,12 +909,15 @@ export class TaskExecutor {
             .map((element) => {
               const anchor = element as {
                 getAttribute: (name: string) => string | null;
+
                 innerText?: string;
+
                 textContent?: string | null;
               };
 
               return {
                 href: anchor.getAttribute("href") ?? "",
+
                 text: anchor.innerText ?? anchor.textContent ?? "",
               };
             })
@@ -1120,37 +941,21 @@ export class TaskExecutor {
       if (handles.has(normalizedExpected)) {
         return {
           verified: true,
-
           expectedHandle,
-
           detectedHandle: `@${normalizedExpected}`,
-
           source: "X_profile_link_candidate",
-
           message: `Identity X terverifikasi. Browser session account ini cocok dengan @${normalizedExpected}.`,
         };
       }
-
-      /*
-       * Kalau kita menemukan profile candidate yang jelas
-       * dan expected tidak ada, jangan langsung menebak
-       * bahwa candidate pertama adalah current user.
-       *
-       * Fail closed.
-       */
 
       const handleList = Array.from(handles).slice(0, 20);
 
       if (handleList.length > 0) {
         return {
           verified: false,
-
           expectedHandle,
-
           detectedHandle: handleList.length === 1 ? `@${handleList[0]}` : null,
-
           source: "X_profile_link_candidate",
-
           message: `Identity X tidak dapat diverifikasi sebagai @${normalizedExpected}. Profile candidates yang ditemukan: ${handleList
             .map((handle) => `@${handle}`)
             .join(", ")}.`,
@@ -1164,13 +969,6 @@ export class TaskExecutor {
       );
     }
 
-    /*
-     * ============================================================
-     * STRATEGY 3
-     * Cari username expected pada URL profile.
-     * ============================================================
-     */
-
     try {
       const currentUrl = page.url();
 
@@ -1179,13 +977,9 @@ export class TaskExecutor {
       if (detected && detected === normalizedExpected) {
         return {
           verified: true,
-
           expectedHandle,
-
           detectedHandle: `@${detected}`,
-
           source: "current_X_profile_url",
-
           message: `Identity X terverifikasi dari current profile URL sebagai @${detected}.`,
         };
       }
@@ -1193,21 +987,11 @@ export class TaskExecutor {
       // Ignore URL parsing errors.
     }
 
-    /*
-     * ============================================================
-     * FAIL CLOSED
-     * ============================================================
-     */
-
     return {
       verified: false,
-
       expectedHandle,
-
       detectedHandle: null,
-
       source: null,
-
       message: `Identity X untuk @${normalizedExpected} tidak dapat diverifikasi dengan aman dari browser session. Task dihentikan agar session account lain tidak pernah dianggap sebagai account ini.`,
     };
   }
@@ -1282,11 +1066,6 @@ export class TaskExecutor {
       return null;
     }
 
-    /*
-     * X username characters secara umum:
-     * letters, numbers, underscore.
-     */
-
     if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
       return null;
     }
@@ -1294,7 +1073,18 @@ export class TaskExecutor {
     return handle.toLowerCase();
   }
 
-  private async executeXAction(task: PlannedTask): Promise<TaskActionResult> {
+  /**
+   * X action tidak langsung dianggap DONE.
+   *
+   * Action X harus berhasil terlebih dahulu, kemudian
+   * TaskPlan.sourceUrl dipakai sebagai halaman verifikasi
+   * checklist whitelist/project.
+   */
+  private async executeXAction(
+    task: PlannedTask,
+    databaseTaskId: number,
+    plan?: TaskPlan,
+  ): Promise<TaskActionResult> {
     console.log(`𝕏 [TaskExecutor] Routing ${task.taskType} → XActionExecutor`);
 
     const result: XActionResult = await this.xActionExecutor.execute(task);
@@ -1303,11 +1093,180 @@ export class TaskExecutor {
       throw new Error(result.output ?? `X action ${task.taskType} gagal.`);
     }
 
-    return {
-      output: result.output ?? null,
+    const actionOutput = result.output ?? null;
 
-      status: "DONE",
+    /*
+     * X action berhasil secara teknis.
+     *
+     * Tetapi itu belum membuktikan whitelist checklist
+     * sudah selesai.
+     */
+
+    if (!plan?.sourceUrl) {
+      const output = JSON.stringify(
+        {
+          action: "X_ACTION",
+          taskType: task.taskType,
+          actionSuccess: true,
+          whitelistVerification: "BLOCKED",
+          message:
+            "X action berhasil, tetapi TaskPlan.sourceUrl tidak tersedia sehingga checklist whitelist tidak dapat diverifikasi.",
+          actionOutput,
+        },
+        null,
+        2,
+      );
+
+      this.taskManager.saveTaskProof(databaseTaskId, output);
+
+      console.log(
+        `⏸️ [TaskExecutor] X action berhasil tetapi sourceUrl tidak tersedia → IN_PROGRESS.`,
+      );
+
+      return {
+        output,
+        status: "IN_PROGRESS",
+      };
+    }
+
+    const verification = await this.verifyWhitelistChecklist(
+      task,
+      plan.sourceUrl,
+    );
+
+    const output = JSON.stringify(
+      {
+        action: "X_ACTION",
+        taskType: task.taskType,
+        actionSuccess: true,
+        actionOutput,
+        whitelistVerification: verification.status,
+        whitelistVerificationOutput: verification.output,
+        whitelistVerificationProof: verification.proof,
+        sourceUrl: plan.sourceUrl,
+      },
+      null,
+      2,
+    );
+
+    this.taskManager.saveTaskProof(databaseTaskId, output);
+
+    if (verification.status === "DONE") {
+      console.log(
+        `✅ [TaskExecutor] X action + whitelist verification confirmed: ${task.planTaskId}`,
+      );
+
+      return {
+        output,
+        status: "DONE",
+      };
+    }
+
+    if (verification.status === "FAILED") {
+      console.log(
+        `❌ [TaskExecutor] X action berhasil tetapi whitelist verification FAILED: ${task.planTaskId}`,
+      );
+
+      return {
+        output,
+        status: "FAILED",
+      };
+    }
+
+    console.log(
+      `⏸️ [TaskExecutor] X action berhasil tetapi whitelist verification belum confirmed: ${task.planTaskId}`,
+    );
+
+    return {
+      output,
+      status: "IN_PROGRESS",
     };
+  }
+
+  /**
+   * Setelah X action selesai, buka kembali halaman project
+   * dan verifikasi checklist whitelist berdasarkan evidence
+   * nyata pada halaman.
+   *
+   * Tidak menggunakan generic success message sebagai bukti.
+   */
+  private async verifyWhitelistChecklist(
+    task: PlannedTask,
+    sourceUrl: string,
+  ): Promise<{
+    status: "DONE" | "IN_PROGRESS" | "FAILED";
+    output: string | null;
+    proof: unknown;
+  }> {
+    console.log(
+      `🔎 [TaskExecutor] Verifying whitelist checklist → ${sourceUrl}`,
+    );
+
+    const account = this.getAccountContext(task.accountId);
+
+    const context: AdaptiveWebExecutionContext = {
+      account,
+    };
+
+    const goal = [
+      `Verify the whitelist/project checklist for project "${task.projectName}".`,
+      `The preceding task was "${task.taskType}" for account "${task.accountName}".`,
+      `A required X action has already been executed successfully.`,
+      `Open the project page and inspect the actual current checklist state.`,
+      `Verify whether the checklist item related to the preceding X action is visibly completed.`,
+      `Accept completion only when there is explicit evidence such as a checked checkbox, aria-checked=true, aria-pressed=true, a disabled/completed control, or clear visible completion state directly associated with the required task.`,
+      `A generic success message, toast, redirect, page load, or absence of an error is NOT sufficient evidence.`,
+      `If the checklist is clearly completed, return DONE.`,
+      `If the checklist is clearly not completed, return BLOCKED.`,
+      `If the checklist state is ambiguous or cannot be verified reliably, return BLOCKED.`,
+      `Do not perform unrelated tasks.`,
+      `Do not bypass CAPTCHA, anti-bot systems, rate limits, authentication restrictions, or security controls.`,
+      `Do not use private keys.`,
+      `Do not sign wallet messages or transactions.`,
+    ].join("\n");
+
+    try {
+      const result = await this.adaptiveWebExecutor.execute(
+        sourceUrl,
+        goal,
+        context,
+      );
+
+      const proof = result.proof;
+
+      if (result.status === "BLOCKED") {
+        return {
+          status: "IN_PROGRESS",
+          output: result.output,
+          proof,
+        };
+      }
+
+      if (result.status === "FAILED" || !result.success) {
+        return {
+          status: "FAILED",
+          output: result.output,
+          proof,
+        };
+      }
+
+      return {
+        status: "DONE",
+        output: result.output,
+        proof,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      return {
+        status: "FAILED",
+        output: message,
+        proof: {
+          status: "FAILED",
+          message,
+        },
+      };
+    }
   }
 
   private async executeOpenPage(task: PlannedTask): Promise<TaskActionResult> {
@@ -1330,15 +1289,12 @@ export class TaskExecutor {
         output: JSON.stringify(
           {
             url: result.url,
-
             title: result.title,
-
             text: result.text.slice(0, 4000),
           },
           null,
           2,
         ),
-
         status: "DONE",
       };
     } finally {
@@ -1435,9 +1391,7 @@ export class TaskExecutor {
 
     const browser = new BrowserExecutor({
       headless: false,
-
       timeoutMs: 30000,
-
       connectOverCDPUrl: walletCdpUrl,
     });
 
@@ -1456,9 +1410,7 @@ export class TaskExecutor {
 
       const result = await walletFormExecutor.execute({
         accountId: account.accountId,
-
         accountName: account.accountName,
-
         walletAddress: account.walletAddress,
       });
 
@@ -1484,29 +1436,17 @@ export class TaskExecutor {
     const output = JSON.stringify(
       {
         action: "FORM",
-
         taskId: databaseTaskId,
-
         formType: task.form?.formType,
-
         targetUrl: task.form?.targetUrl,
-
         fieldsConfigured: task.form?.fields.length ?? 0,
-
         checkboxesConfigured: task.form?.checkboxes.length ?? 0,
-
         fieldsFilled: formResult.fieldsFilled,
-
         checkboxesChecked: formResult.checkboxesChecked,
-
         submitAttempted: formResult.submitAttempted,
-
         submitSucceeded: formResult.submitSucceeded,
-
         executionStatus: formResult.proof.executionStatus,
-
         message: formResult.message,
-
         proof: formResult.proof,
       },
       null,
@@ -1521,7 +1461,6 @@ export class TaskExecutor {
 
         return {
           output,
-
           status: "IN_PROGRESS",
         };
 
@@ -1532,7 +1471,6 @@ export class TaskExecutor {
 
         return {
           output,
-
           status: "DONE",
         };
 
@@ -1543,7 +1481,6 @@ export class TaskExecutor {
 
         return {
           output,
-
           status: "FAILED",
         };
 
@@ -1562,27 +1499,16 @@ export class TaskExecutor {
     const output = JSON.stringify(
       {
         action: "FORM_WALLET",
-
         taskId: databaseTaskId,
-
         projectName: task.projectName,
-
         accountName: task.accountName,
-
         targetUrl: task.form?.targetUrl ?? null,
-
         mode: result.mode,
-
         success: result.success,
-
         connected: result.connected,
-
         walletAddressFilled: result.walletAddressFilled,
-
         walletVerification: result.walletVerification,
-
         rabbyConnection: result.rabbyConnection,
-
         message: result.message,
       },
       null,
@@ -1600,7 +1526,6 @@ export class TaskExecutor {
 
       return {
         output,
-
         status: "DONE",
       };
     }
@@ -1611,7 +1536,6 @@ export class TaskExecutor {
 
     return {
       output,
-
       status: "IN_PROGRESS",
     };
   }
@@ -1644,23 +1568,14 @@ export class TaskExecutor {
 
     const goal = [
       `Complete the whitelist/project task for project "${task.projectName}".`,
-
       `Task description: ${task.description}`,
-
       `Use the provided account context when the page requires account-specific information.`,
-
       `Inspect the actual page and determine the next safe action from the current page state.`,
-
       `Complete the normal public task flow when possible.`,
-
       `Do not bypass CAPTCHA, anti-bot systems, rate limits, authentication restrictions, or security controls.`,
-
       `Do not use private keys.`,
-
       `Do not sign wallet messages or transactions.`,
-
       `If authentication, wallet connection, wallet signing, or manual approval is required, stop and report BLOCKED.`,
-
       `When the page clearly confirms completion, stop with DONE.`,
     ].join("\n");
 
@@ -1681,25 +1596,15 @@ export class TaskExecutor {
     const output = JSON.stringify(
       {
         action: "ADAPTIVE_WEB",
-
         taskId: databaseTaskId,
-
         projectName: task.projectName,
-
         accountName: task.accountName,
-
         targetUrl,
-
         success: result.success,
-
         status: result.status,
-
         message: result.output,
-
         steps: result.steps,
-
         finalUrl: result.finalUrl,
-
         proof: result.proof,
       },
       null,
@@ -1709,7 +1614,6 @@ export class TaskExecutor {
     if (result.status === "BLOCKED") {
       return {
         output,
-
         status: "IN_PROGRESS",
       };
     }
@@ -1717,14 +1621,12 @@ export class TaskExecutor {
     if (!result.success || result.status === "FAILED") {
       return {
         output,
-
         status: "FAILED",
       };
     }
 
     return {
       output,
-
       status: "DONE",
     };
   }
@@ -1738,15 +1640,12 @@ export class TaskExecutor {
       output: JSON.stringify(
         {
           action: "CUSTOM",
-
           description: task.description,
-
           targetUrl: task.targetUrl ?? null,
         },
         null,
         2,
       ),
-
       status: "DONE",
     };
   }
@@ -1762,13 +1661,11 @@ export class TaskExecutor {
 
     const llm = new GeminiProvider(
       apiKey,
-
       process.env.GEMINI_MODEL ?? "gemini-3.5-flash",
     );
 
     const browser = new BrowserExecutor({
       headless: true,
-
       timeoutMs: 30000,
     });
 
@@ -1798,11 +1695,8 @@ export class TaskExecutor {
       .get(accountId) as
       | {
           id: number;
-
           name: string;
-
           twitter_handle: string | null;
-
           wallet_address: string | null;
         }
       | undefined;
@@ -1815,11 +1709,8 @@ export class TaskExecutor {
 
     return {
       accountId: account.id,
-
       accountName: account.name,
-
       twitterHandle: account.twitter_handle,
-
       walletAddress: account.wallet_address,
     };
   }
@@ -1863,13 +1754,9 @@ export class TaskExecutor {
 
     const result = stmt.run(
       project.id,
-
       task.accountId,
-
       task.taskType,
-
       task.targetUrl ?? task.form?.targetUrl ?? null,
-
       task.description,
     );
 
@@ -1881,7 +1768,6 @@ export class TaskExecutor {
     completedPlanTaskIds: Set<string>,
   ): {
     ok: boolean;
-
     reason?: string;
   } {
     if (!task.dependsOn || task.dependsOn.length === 0) {
@@ -1897,7 +1783,6 @@ export class TaskExecutor {
     if (missing.length > 0) {
       return {
         ok: false,
-
         reason: `Dependency belum selesai: ${missing.join(", ")}`,
       };
     }
@@ -1910,17 +1795,11 @@ export class TaskExecutor {
   private isXAction(taskType: string): boolean {
     return [
       "X_FOLLOW",
-
       "X_LIKE",
-
       "X_REPOST",
-
       "X_COMMENT",
-
       "X_REPLY",
-
       "X_QUOTE",
-
       "X_POST",
     ].includes(taskType);
   }

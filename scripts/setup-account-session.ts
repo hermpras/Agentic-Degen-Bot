@@ -6,7 +6,18 @@ import path from "path";
 import { BrowserExecutor } from "../src/browser/browser-executor.js";
 import { BrowserSessionManager } from "../src/browser/browser-session-manager.js";
 
-const CDP_PORT = 9222;
+function getCdpPort(accountId: number): number {
+  return 9222 + (accountId - 1) * 2;
+}
+
+function getUserDataDir(accountId: number): string {
+  return path.resolve(
+    process.cwd(),
+    "playwright",
+    "chrome-profiles",
+    `account-${accountId}`,
+  );
+}
 
 function ask(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -48,16 +59,29 @@ async function waitForCdp(url: string, timeoutMs = 15_000): Promise<void> {
   );
 }
 
-function startChrome(): {
+function removeDirectoryIfExists(directory: string): void {
+  if (!fs.existsSync(directory)) {
+    return;
+  }
+
+  console.log("");
+  console.log(`🧹 Membersihkan Chrome profile: ${directory}`);
+
+  fs.rmSync(directory, {
+    recursive: true,
+    force: true,
+  });
+
+  console.log("✅ Chrome profile berhasil dibersihkan.");
+}
+
+function startChrome(accountId: number): {
   process: ChildProcess;
   userDataDir: string;
+  cdpPort: number;
 } {
-  const userDataDir = path.resolve(
-    process.cwd(),
-    "playwright",
-    "chrome-profiles",
-    "manual-login",
-  );
+  const cdpPort = getCdpPort(accountId);
+  const userDataDir = getUserDataDir(accountId);
 
   fs.mkdirSync(userDataDir, {
     recursive: true,
@@ -71,14 +95,15 @@ function startChrome(): {
   }
 
   console.log("");
-  console.log("🌐 Membuka Google Chrome dengan profile automation khusus...");
-  console.log(`👤 Profile: ${userDataDir}`);
-  console.log(`🔗 CDP port: ${CDP_PORT}`);
+  console.log("🌐 Membuka Google Chrome dengan profile account-specific...");
+  console.log(`👤 Account : ${accountId}`);
+  console.log(`👤 Profile : ${userDataDir}`);
+  console.log(`🔗 CDP port: ${cdpPort}`);
 
   const chromeProcess = spawn(
     chromePath,
     [
-      `--remote-debugging-port=${CDP_PORT}`,
+      `--remote-debugging-port=${cdpPort}`,
       `--user-data-dir=${userDataDir}`,
       "--no-first-run",
       "--no-default-browser-check",
@@ -93,10 +118,11 @@ function startChrome(): {
   return {
     process: chromeProcess,
     userDataDir,
+    cdpPort,
   };
 }
 
-async function main() {
+async function main(): Promise<void> {
   const rawAccountId = process.argv[2];
 
   if (!rawAccountId) {
@@ -114,6 +140,8 @@ async function main() {
 
   const sessionManager = new BrowserSessionManager();
   const sessionInfo = sessionManager.getSessionInfo(accountId);
+  const userDataDir = getUserDataDir(accountId);
+  const cdpPort = getCdpPort(accountId);
 
   console.log("");
   console.log("🔐 Account Session Setup");
@@ -121,6 +149,8 @@ async function main() {
   console.log(`Account ID : ${accountId}`);
   console.log(`Session    : ${sessionInfo.sessionPath}`);
   console.log(`Existing   : ${sessionInfo.exists ? "YA" : "TIDAK"}`);
+  console.log(`CDP Port   : ${cdpPort}`);
+  console.log(`Chrome     : ${userDataDir}`);
   console.log("");
 
   if (sessionInfo.exists) {
@@ -133,13 +163,36 @@ async function main() {
       return;
     }
 
+    console.log("");
+    console.log(`🗑️ Menghapus session file Account ${accountId}...`);
+
     sessionManager.deleteSession(accountId);
+
+    console.log("✅ Session file dihapus.");
+
+    // Penting:
+    // StorageState hanya menghapus file session.
+    // Cookie/session X yang tersimpan di Chrome profile
+    // harus ikut dibersihkan agar login benar-benar fresh.
+    removeDirectoryIfExists(userDataDir);
+  } else if (fs.existsSync(userDataDir)) {
+    const answer = await ask(
+      `⚠️ Chrome profile Account ${accountId} sudah ada tetapi session file tidak ada.\n` +
+        "Bersihkan profile dan mulai login baru? (y/n): ",
+    );
+
+    if (answer.toLowerCase() !== "y") {
+      console.log("❌ Setup dibatalkan.");
+      return;
+    }
+
+    removeDirectoryIfExists(userDataDir);
   }
 
-  const chrome = startChrome();
+  const chrome = startChrome(accountId);
 
   try {
-    const cdpUrl = `http://127.0.0.1:${CDP_PORT}`;
+    const cdpUrl = `http://127.0.0.1:${chrome.cdpPort}`;
 
     console.log("");
     console.log("⏳ Menunggu Chrome siap...");
@@ -159,9 +212,14 @@ async function main() {
       console.log("==========================================");
       console.log("🔑 LOGIN MANUAL");
       console.log("==========================================");
+      console.log(`Account ID : ${accountId}`);
+      console.log("");
       console.log("Login ke X menggunakan account yang sesuai.");
       console.log("");
       console.log("Jangan berikan password/credential ke agent.");
+      console.log("");
+      console.log("Pastikan username X yang tampil adalah account");
+      console.log(`yang memang ditujukan untuk Account #${accountId}.`);
       console.log("");
       console.log("Setelah login berhasil dan halaman X sudah normal,");
       console.log("kembali ke terminal ini.");
@@ -187,6 +245,8 @@ async function main() {
       console.log("==========================================");
       console.log(`Account : ${accountId}`);
       console.log(`Session : ${sessionPath}`);
+      console.log(`Chrome  : ${userDataDir}`);
+      console.log(`CDP     : ${cdpUrl}`);
       console.log("");
       console.log("Account ini sekarang bisa digunakan TaskExecutor.");
       console.log("==========================================");

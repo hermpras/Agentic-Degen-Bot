@@ -17,11 +17,12 @@ export interface ProjectTaskWorkflowResult {
 }
 
 export interface ProjectTaskWorkflowExecutor {
-  executePlan(tasks: TaskPlan["tasks"]): Promise<TaskExecutionReport>;
+  executePlan(plan: TaskPlan): Promise<TaskExecutionReport>;
 }
 
 export class ProjectTaskWorkflow {
   private readonly planner: TaskPlanner;
+
   private readonly executor: ProjectTaskWorkflowExecutor;
 
   constructor(
@@ -59,11 +60,12 @@ export class ProjectTaskWorkflow {
       `📋 [ProjectTaskWorkflow] Tasks to execute: ${executionPlan.tasks.length}`,
     );
 
-    return this.executor.executePlan(executionPlan.tasks);
+    return this.executor.executePlan(executionPlan);
   }
 
   async run(input: TaskPlannerInput): Promise<ProjectTaskWorkflowResult> {
     const plan = this.createPlan(input);
+
     const report = await this.executePlan(plan);
 
     return {

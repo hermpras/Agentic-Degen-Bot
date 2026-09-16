@@ -43,9 +43,22 @@ async function main(): Promise<void> {
   console.log("==========================================");
   console.log("");
 
-  const server = await startTestServer();
+  const rawAccountId = process.argv[2];
 
-  const accountId = 1;
+  if (!rawAccountId) {
+    throw new Error(
+      "Account ID wajib diberikan.\n" +
+        "Contoh: npx tsx scripts/test-account-browser.ts 1",
+    );
+  }
+
+  const accountId = Number(rawAccountId);
+
+  if (!Number.isInteger(accountId) || accountId <= 0) {
+    throw new Error("Account ID harus berupa integer positif.");
+  }
+
+  const server = await startTestServer();
 
   const accountBrowser = new AccountBrowser(undefined, {
     headless: false,
@@ -57,7 +70,15 @@ async function main(): Promise<void> {
 
     const executor = await accountBrowser.openForAccount(accountId);
 
-    console.log(`👤 Current account: ${accountBrowser.getCurrentAccountId()}`);
+    const currentAccountId = accountBrowser.getCurrentAccountId();
+
+    console.log(`👤 Current account: ${currentAccountId}`);
+
+    if (currentAccountId !== accountId) {
+      throw new Error(
+        `Account mismatch. Expected ${accountId}, got ${currentAccountId}.`,
+      );
+    }
 
     const result = await executor.open(`http://127.0.0.1:${PORT}`);
 
@@ -70,7 +91,9 @@ async function main(): Promise<void> {
       throw new Error("Account browser gagal membuka test page.");
     }
 
-    console.log("✅ AccountBrowser berhasil menggunakan session Account 1.");
+    console.log(
+      `✅ AccountBrowser berhasil menggunakan session Account ${accountId}.`,
+    );
 
     console.log("💾 Saving session...");
 
@@ -82,10 +105,13 @@ async function main(): Promise<void> {
 
     console.log("");
     console.log("🎉 ACCOUNT BROWSER TEST BERHASIL.");
-    console.log("✅ Account ID berhasil diteruskan ke browser.");
-    console.log("✅ Session account-1.json berhasil digunakan.");
-    console.log("✅ BrowserExecutor berhasil dibuat otomatis.");
-    console.log("✅ Session berhasil disimpan.");
+    console.log("==========================================");
+    console.log(`✅ Account ID      : ${accountId}`);
+    console.log(`✅ Current account : ${currentAccountId}`);
+    console.log(`✅ Session berhasil digunakan.`);
+    console.log(`✅ BrowserExecutor berhasil dibuat otomatis.`);
+    console.log(`✅ Session berhasil disimpan.`);
+    console.log("==========================================");
   } finally {
     await accountBrowser.close();
 
@@ -99,6 +125,6 @@ async function main(): Promise<void> {
 main().catch((error) => {
   console.error("");
   console.error("❌ Account browser test gagal:");
-  console.error(error);
+  console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 });
