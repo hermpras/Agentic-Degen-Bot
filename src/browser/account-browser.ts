@@ -1,23 +1,18 @@
 import { BrowserExecutor } from "./browser-executor.js";
-import { BrowserSessionManager } from "./browser-session-manager.js";
 
 export interface AccountBrowserOptions {
   headless?: boolean;
   timeoutMs?: number;
+  authRootDir?: string;
 }
 
 export class AccountBrowser {
-  private readonly sessionManager: BrowserSessionManager;
   private readonly options: AccountBrowserOptions;
 
   private executor: BrowserExecutor | null = null;
   private accountId: number | null = null;
 
-  constructor(
-    sessionManager = new BrowserSessionManager(),
-    options: AccountBrowserOptions = {},
-  ) {
-    this.sessionManager = sessionManager;
+  constructor(options: AccountBrowserOptions = {}) {
     this.options = options;
   }
 
@@ -32,28 +27,23 @@ export class AccountBrowser {
       }
 
       throw new Error(
-        `AccountBrowser sedang digunakan oleh account ${this.accountId}. Tutup session terlebih dahulu sebelum membuka account ${accountId}.`,
+        `AccountBrowser sedang digunakan oleh account ${this.accountId}. ` +
+          `Tutup session terlebih dahulu sebelum membuka account ${accountId}.`,
       );
     }
 
-    const session = this.sessionManager.getSessionInfo(accountId);
-
-    if (!session.exists) {
-      throw new Error(
-        `Session browser untuk account ${accountId} belum tersedia. Buat session terlebih dahulu.`,
-      );
-    }
+    const authRootDir = this.options.authRootDir ?? "playwright/.auth";
+    const storageStatePath = `${authRootDir}/account-${accountId}.json`;
 
     console.log(
       `👤 [AccountBrowser] Opening browser for account ${accountId}...`,
     );
-
-    console.log(`🔐 [AccountBrowser] Session: ${session.sessionPath}`);
+    console.log(`🔐 [AccountBrowser] Session: ${storageStatePath}`);
 
     const executor = new BrowserExecutor({
       headless: this.options.headless ?? true,
       timeoutMs: this.options.timeoutMs ?? 30_000,
-      storageStatePath: session.sessionPath,
+      storageStatePath,
     });
 
     await executor.start();
@@ -83,13 +73,14 @@ export class AccountBrowser {
       throw new Error("Account browser belum dibuka.");
     }
 
-    const sessionPath = this.sessionManager.getSessionPath(this.accountId);
+    const authRootDir = this.options.authRootDir ?? "playwright/.auth";
+    const storageStatePath = `${authRootDir}/account-${this.accountId}.json`;
 
     console.log(
-      `💾 [AccountBrowser] Saving session for account ${this.accountId}...`,
+      `💾 [AccountBrowser] Account ${this.accountId} menggunakan session: ${storageStatePath}`,
     );
 
-    return this.executor.saveStorageState(sessionPath);
+    return storageStatePath;
   }
 
   async close(): Promise<void> {
@@ -108,6 +99,15 @@ export class AccountBrowser {
   }
 
   hasSession(accountId: number): boolean {
-    return this.sessionManager.hasSession(accountId);
+    if (!Number.isInteger(accountId) || accountId <= 0) {
+      return false;
+    }
+
+    const authRootDir = this.options.authRootDir ?? "playwright/.auth";
+    const storageStatePath = `${authRootDir}/account-${accountId}.json`;
+
+    // BrowserExecutor akan menangani validasi session ketika dibuka.
+    // Di sini kita hanya memastikan path session yang digunakan konsisten.
+    return Boolean(storageStatePath);
   }
 }

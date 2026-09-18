@@ -4,6 +4,7 @@ export interface BrowserExecutorOptions {
   headless?: boolean;
   timeoutMs?: number;
   storageStatePath?: string;
+  userDataDir?: string;
   connectOverCDPUrl?: string;
 }
 
@@ -21,9 +22,7 @@ export interface BrowserPageResult {
 
 export class BrowserExecutor {
   private browser: Browser | null = null;
-
   private context: BrowserContext | null = null;
-
   private page: Page | null = null;
 
   constructor(private readonly options: BrowserExecutorOptions = {}) {
@@ -32,14 +31,26 @@ export class BrowserExecutor {
         "headless=true tidak bisa dipakai bersama connectOverCDPUrl.",
       );
     }
+
+    if (options.userDataDir && options.connectOverCDPUrl) {
+      throw new Error(
+        "userDataDir tidak bisa dipakai bersama connectOverCDPUrl.",
+      );
+    }
+
+    if (options.userDataDir && options.storageStatePath) {
+      throw new Error(
+        "userDataDir tidak bisa dipakai bersama storageStatePath.",
+      );
+    }
   }
 
   async start(): Promise<void> {
-    if (this.browser) {
+    if (this.browser || this.context) {
       return;
     }
 
-    const timeoutMs = this.options.timeoutMs ?? 30000;
+    const timeoutMs = this.options.timeoutMs ?? 30_000;
 
     if (this.options.connectOverCDPUrl) {
       this.browser = await chromium.connectOverCDP(
@@ -63,6 +74,21 @@ export class BrowserExecutor {
       return;
     }
 
+    if (this.options.userDataDir) {
+      this.context = await chromium.launchPersistentContext(
+        this.options.userDataDir,
+        {
+          headless: this.options.headless ?? true,
+        },
+      );
+
+      this.page = this.context.pages()[0] ?? (await this.context.newPage());
+
+      this.page.setDefaultTimeout(timeoutMs);
+
+      return;
+    }
+
     this.browser = await chromium.launch({
       headless: this.options.headless ?? true,
     });
@@ -72,7 +98,6 @@ export class BrowserExecutor {
     });
 
     this.page = await this.context.newPage();
-
     this.page.setDefaultTimeout(timeoutMs);
   }
 
@@ -221,7 +246,7 @@ export class BrowserExecutor {
 
     try {
       return await this.context.waitForEvent("page", {
-        timeout: timeoutMs ?? this.options.timeoutMs ?? 10000,
+        timeout: timeoutMs ?? this.options.timeoutMs ?? 10_000,
       });
     } catch (error) {
       if (error instanceof Error && /Timeout/i.test(error.message)) {

@@ -39,7 +39,7 @@ export class XActionExecutor {
 
   constructor(accountBrowser?: AccountBrowser) {
     this.accountBrowser =
-      accountBrowser ?? new AccountBrowser(undefined, { headless: true });
+      accountBrowser ?? new AccountBrowser({ headless: true });
   }
 
   async inspectFollow(
